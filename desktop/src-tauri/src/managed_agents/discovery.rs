@@ -442,7 +442,7 @@ pub fn try_record_agent_command(
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        "goose" | "cursor-agent" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -704,7 +704,7 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
         }
     }
 
-    if let Some(path) = find_via_login_shell(command) {
+    if let Some(path) = runtime_metadata::resolve_login_shell_or_cursor(command) {
         return Some(path);
     }
     for dir in common_binary_paths() {

@@ -9,7 +9,7 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                        (send_message, etc.)
 ```
 
-Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)), and **cursor** (via the [Cursor CLI](https://cursor.com/docs/cli/acp) `cursor-agent acp`).
 
 ## Prerequisites
 
@@ -97,6 +97,34 @@ buzz-acp
 
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
+
+## Running with Cursor
+
+The [Cursor CLI](https://cursor.com/docs/cli/acp) speaks ACP natively over stdio.
+Buzz spawns `cursor-agent acp` (same entrypoint the Desktop runtime catalog uses).
+
+```bash
+# Install the Cursor CLI (adds cursor-agent to ~/.local/bin when not already present)
+curl -sS https://cursor.com/install | bash
+
+# Authenticate — pick one:
+cursor-agent login
+# export CURSOR_API_KEY="cursor_..."   # or set in .env
+
+# Run
+export BUZZ_ACP_AGENT_COMMAND="cursor-agent"
+export BUZZ_ACP_AGENT_ARGS="acp"   # default when args are empty; safe to omit
+
+buzz-acp
+```
+
+> **Auth note:** Cursor advertises `cursor_login` as its ACP auth method. Pre-authenticate
+> with `cursor-agent login` or `CURSOR_API_KEY` before starting the harness — otherwise
+> `buzz-acp models` and the first turn will fail with `Authentication required`.
+
+> **PATH note:** If the Cursor desktop app installed the CLI but `cursor-agent` is not on
+> PATH, use the full path from `~/.local/bin/cursor-agent` or the versioned binary under
+> `~/Library/Application Support/Cursor/.../cursor-agent/versions/` (macOS).
 
 ## Configuration
 

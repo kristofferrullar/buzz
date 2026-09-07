@@ -83,9 +83,139 @@ impl KnownAcpRuntime {
     }
 }
 
+/// Resolve `cursor-agent` when it is not on PATH (versioned Cursor install dirs).
+pub(crate) fn resolve_cursor_agent_command(command: &str) -> Option<std::path::PathBuf> {
+    if super::normalize_command_identity(command) != "cursor-agent" {
+        return None;
+    }
+
+    let home = dirs::home_dir()?;
+    let local_bin = home.join(".local/bin/cursor-agent");
+    if is_executable_file(&local_bin) {
+        return Some(local_bin);
+    }
+
+    for versions_dir in cursor_agent_version_dirs(&home) {
+        if let Some(path) = latest_cursor_agent_in_versions_dir(&versions_dir) {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+fn cursor_agent_version_dirs(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![home.join(".local/share/cursor-agent/versions")];
+    #[cfg(target_os = "macos")]
+    {
+        dirs.push(
+            home.join("Library/Application Support/Cursor/User/globalStorage/anysphere.cursor-agent-worker/agent-cli/.local/share/cursor-agent/versions"),
+        );
+    }
+    dirs
+}
+
+fn latest_cursor_agent_in_versions_dir(
+    versions_dir: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let mut latest: Option<(String, std::path::PathBuf)> = None;
+    let entries = std::fs::read_dir(versions_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let candidate = path.join("cursor-agent");
+        if !is_executable_file(&candidate) {
+            continue;
+        }
+        let version_name = entry.file_name().to_string_lossy().into_owned();
+        if latest.as_ref().is_none_or(|(name, _)| version_name > *name) {
+            latest = Some((version_name, candidate));
+        }
+    }
+    latest.map(|(_, path)| path)
+}
+
+/// Login-shell PATH lookup, then well-known `cursor-agent` install dirs.
+pub(crate) fn resolve_login_shell_or_cursor(command: &str) -> Option<std::path::PathBuf> {
+    super::find_via_login_shell(command).or_else(|| resolve_cursor_agent_command(command))
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::known_acp_runtime_exact;
+    use super::super::{clear_resolve_cache, normalize_agent_args};
+    use super::resolve_cursor_agent_command;
+
+    #[test]
+    fn normalizes_cursor_agent_args_to_acp() {
+        assert_eq!(
+            normalize_agent_args("cursor-agent", Vec::new()),
+            vec!["acp".to_string()]
+        );
+        assert_eq!(
+            normalize_agent_args("cursor-agent", vec!["acp".into()]),
+            vec!["acp".to_string()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_cursor_agent_command_finds_versioned_install_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::managed_agents::lock_path_mutex();
+        clear_resolve_cache();
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let versions_dir = home.join(".local/share/cursor-agent/versions/2026.07.23-e383d2b");
+        std::fs::create_dir_all(&versions_dir).expect("create versions dir");
+
+        let binary = versions_dir.join("cursor-agent");
+        std::fs::write(&binary, "#!/bin/sh\necho cursor-agent\n").expect("write binary");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod binary");
+
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+
+        let resolved = resolve_cursor_agent_command("cursor-agent");
+
+        if let Some(value) = previous_home {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        assert_eq!(resolved, Some(binary));
+    }
+
+    #[test]
+    fn resolve_cursor_agent_command_ignores_other_commands() {
+        assert!(resolve_cursor_agent_command("goose").is_none());
+    }
 
     #[test]
     fn vendor_metadata_distinguishes_cli_and_adapter_guidance() {
