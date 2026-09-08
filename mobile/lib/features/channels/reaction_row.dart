@@ -5,13 +5,14 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/emoji_burst.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/emoji/native_emoji_glyph.dart';
 import '../../shared/emoji/positive_emoji.dart';
-import '../profile/user_cache_provider.dart';
-import '../profile/user_profile.dart';
+import '../../shared/profile/user_cache_provider.dart';
+import '../../shared/profile/user_profile.dart';
 import 'channel_management_provider.dart';
 import 'emoji_picker.dart';
 import 'recent_emoji_provider.dart';
@@ -316,7 +317,7 @@ void showReactionDetailSheet({
   required List<TimelineReaction> reactions,
   required String initialEmoji,
 }) {
-  showModalBottomSheet<void>(
+  showBuzzModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
@@ -461,6 +462,7 @@ class _ReactorTile extends StatelessWidget {
         initial:
             profile?.initial ??
             (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?'),
+        isAgent: profile?.isAgent == true,
       ),
       title: Text(
         displayName,
@@ -487,8 +489,13 @@ class _ReactorTile extends StatelessWidget {
 class _ReactorAvatar extends StatelessWidget {
   final String? avatarUrl;
   final String initial;
+  final bool isAgent;
 
-  const _ReactorAvatar({required this.avatarUrl, required this.initial});
+  const _ReactorAvatar({
+    required this.avatarUrl,
+    required this.initial,
+    required this.isAgent,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -496,6 +503,7 @@ class _ReactorAvatar extends StatelessWidget {
       imageUrl: avatarUrl,
       radius: 20,
       fallback: Text(initial),
+      isAgent: isAgent,
     );
   }
 }
