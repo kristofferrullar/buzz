@@ -179,24 +179,37 @@ impl KnownAcpRuntime {
 }
 
 /// Resolve `cursor-agent` when it is not on PATH (versioned Cursor install dirs).
+///
+/// Precedence: the standalone installer's `~/.local/bin` copy first (what
+/// `curl -sS https://cursor.com/install | bash` creates), then the newest
+/// version across every known versioned install root.
 pub(crate) fn resolve_cursor_agent_command(command: &str) -> Option<std::path::PathBuf> {
     if super::normalize_command_identity(command) != "cursor-agent" {
         return None;
     }
 
     let home = dirs::home_dir()?;
-    let local_bin = home.join(".local/bin/cursor-agent");
-    if is_executable_file(&local_bin) {
+    let binary_name = super::executable_basename("cursor-agent");
+
+    let local_bin = home.join(".local/bin").join(&binary_name);
+    if super::is_executable_file(&local_bin) {
         return Some(local_bin);
     }
 
+    // Pick the newest version across *all* roots, not the first root that
+    // happens to contain one — a stale standalone copy must not shadow a
+    // newer binary managed by the Cursor desktop app.
+    let mut best: Option<(Vec<u64>, std::path::PathBuf)> = None;
     for versions_dir in cursor_agent_version_dirs(&home) {
-        if let Some(path) = latest_cursor_agent_in_versions_dir(&versions_dir) {
-            return Some(path);
+        if let Some((version, path)) =
+            latest_cursor_agent_in_versions_dir(&versions_dir, &binary_name)
+        {
+            if best.as_ref().is_none_or(|(seen, _)| version > *seen) {
+                best = Some((version, path));
+            }
         }
     }
-
-    None
+    best.map(|(_, path)| path)
 }
 
 fn cursor_agent_version_dirs(home: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -210,26 +223,46 @@ fn cursor_agent_version_dirs(home: &std::path::Path) -> Vec<std::path::PathBuf> 
     dirs
 }
 
+/// Parse a Cursor version directory name into comparable numeric components.
+///
+/// Names look like `2026.07.23-e383d2b` or `2026.06.24-00-45-58-9f61de7`; the
+/// leading dotted CalVer segment is what orders them. Returns `None` for names
+/// that are not versions at all, so a sibling directory such as `nightly` or a
+/// partial download can never be selected — plain string ordering would sort
+/// any such name above every digit-led version.
+fn parse_version_components(name: &str) -> Option<Vec<u64>> {
+    let head = name.split('-').next()?;
+    if head.is_empty() {
+        return None;
+    }
+    head.split('.')
+        .map(|part| part.parse::<u64>().ok())
+        .collect()
+}
+
 fn latest_cursor_agent_in_versions_dir(
     versions_dir: &std::path::Path,
-) -> Option<std::path::PathBuf> {
-    let mut latest: Option<(String, std::path::PathBuf)> = None;
+    binary_name: &str,
+) -> Option<(Vec<u64>, std::path::PathBuf)> {
+    let mut latest: Option<(Vec<u64>, std::path::PathBuf)> = None;
     let entries = std::fs::read_dir(versions_dir).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
             continue;
         }
-        let candidate = path.join("cursor-agent");
-        if !is_executable_file(&candidate) {
+        let candidate = path.join(binary_name);
+        if !super::is_executable_file(&candidate) {
             continue;
         }
-        let version_name = entry.file_name().to_string_lossy().into_owned();
-        if latest.as_ref().is_none_or(|(name, _)| version_name > *name) {
-            latest = Some((version_name, candidate));
+        let Some(version) = parse_version_components(&entry.file_name().to_string_lossy()) else {
+            continue;
+        };
+        if latest.as_ref().is_none_or(|(seen, _)| version > *seen) {
+            latest = Some((version, candidate));
         }
     }
-    latest.map(|(_, path)| path)
+    latest
 }
 
 /// Login-shell PATH lookup, then well-known `cursor-agent` install dirs.
@@ -237,31 +270,46 @@ pub(crate) fn resolve_login_shell_or_cursor(command: &str) -> Option<std::path::
     super::find_via_login_shell(command).or_else(|| resolve_cursor_agent_command(command))
 }
 
-fn is_executable_file(path: &std::path::Path) -> bool {
-    let Ok(metadata) = path.metadata() else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::known_acp_runtime_exact;
     use super::super::{clear_resolve_cache, normalize_agent_args};
-    use super::resolve_cursor_agent_command;
+    use super::{parse_version_components, resolve_cursor_agent_command};
+
+    /// Restores `HOME` on drop so a panic inside the test body cannot leak a
+    /// temp-dir `HOME` into the rest of the test binary.
+    #[cfg(unix)]
+    struct HomeGuard(Option<std::ffi::OsString>);
+
+    #[cfg(unix)]
+    impl HomeGuard {
+        fn set(home: &std::path::Path) -> Self {
+            let previous = std::env::var_os("HOME");
+            std::env::set_var("HOME", home);
+            Self(previous)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent dir");
+        }
+        std::fs::write(path, "#!/bin/sh\necho cursor-agent\n").expect("write binary");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod binary");
+    }
 
     #[test]
     fn normalizes_cursor_agent_args_to_acp() {
@@ -278,33 +326,95 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_cursor_agent_command_finds_versioned_install_dir() {
-        use std::os::unix::fs::PermissionsExt;
-
         let _guard = crate::managed_agents::lock_path_mutex();
         clear_resolve_cache();
 
         let temp = tempfile::tempdir().expect("tempdir");
         let home = temp.path().join("home");
-        let versions_dir = home.join(".local/share/cursor-agent/versions/2026.07.23-e383d2b");
-        std::fs::create_dir_all(&versions_dir).expect("create versions dir");
+        let binary =
+            home.join(".local/share/cursor-agent/versions/2026.07.23-e383d2b/cursor-agent");
+        write_executable(&binary);
 
-        let binary = versions_dir.join("cursor-agent");
-        std::fs::write(&binary, "#!/bin/sh\necho cursor-agent\n").expect("write binary");
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod binary");
+        let _home = HomeGuard::set(&home);
+        assert_eq!(resolve_cursor_agent_command("cursor-agent"), Some(binary));
+    }
 
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", &home);
+    #[cfg(unix)]
+    #[test]
+    fn resolve_cursor_agent_command_prefers_local_bin() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+        clear_resolve_cache();
 
-        let resolved = resolve_cursor_agent_command("cursor-agent");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let local_bin = home.join(".local/bin/cursor-agent");
+        write_executable(&local_bin);
+        write_executable(
+            &home.join(".local/share/cursor-agent/versions/2026.07.23-e383d2b/cursor-agent"),
+        );
 
-        if let Some(value) = previous_home {
-            std::env::set_var("HOME", value);
-        } else {
-            std::env::remove_var("HOME");
-        }
+        let _home = HomeGuard::set(&home);
+        assert_eq!(
+            resolve_cursor_agent_command("cursor-agent"),
+            Some(local_bin)
+        );
+    }
 
-        assert_eq!(resolved, Some(binary));
+    #[cfg(unix)]
+    #[test]
+    fn resolve_cursor_agent_command_picks_newest_version_not_longest_string() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+        clear_resolve_cache();
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let versions = home.join(".local/share/cursor-agent/versions");
+        // Lexicographically "2026.9.5" > "2026.10.1" ('9' > '1'), so a plain
+        // string comparison would wrongly pick the September build.
+        write_executable(&versions.join("2026.9.5-aaaaaaa/cursor-agent"));
+        let newest = versions.join("2026.10.1-bbbbbbb/cursor-agent");
+        write_executable(&newest);
+
+        let _home = HomeGuard::set(&home);
+        assert_eq!(resolve_cursor_agent_command("cursor-agent"), Some(newest));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_cursor_agent_command_ignores_non_version_directories() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+        clear_resolve_cache();
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let versions = home.join(".local/share/cursor-agent/versions");
+        // Digits sort below letters, so "nightly" would beat every real
+        // version under a plain string comparison.
+        write_executable(&versions.join("nightly/cursor-agent"));
+        let real = versions.join("2026.08.31-4057e58/cursor-agent");
+        write_executable(&real);
+
+        let _home = HomeGuard::set(&home);
+        assert_eq!(resolve_cursor_agent_command("cursor-agent"), Some(real));
+    }
+
+    #[test]
+    fn parse_version_components_rejects_non_versions() {
+        assert_eq!(
+            parse_version_components("2026.07.23-e383d2b"),
+            Some(vec![2026, 7, 23])
+        );
+        assert_eq!(
+            parse_version_components("2026.06.24-00-45-58-9f61de7"),
+            Some(vec![2026, 6, 24])
+        );
+        assert_eq!(parse_version_components("nightly"), None);
+        assert_eq!(parse_version_components("tmp-download"), None);
+        assert_eq!(parse_version_components(""), None);
+        assert!(
+            parse_version_components("2026.10.1-b") > parse_version_components("2026.9.5-a"),
+            "numeric ordering must beat lexicographic ordering"
+        );
     }
 
     #[test]
