@@ -44,6 +44,7 @@ if [[ "$START_ONLY" == true ]]; then
 fi
 
 [[ -n "$RELAY_HOST" ]] || die "--host is required (the host's Tailscale MagicDNS name)"
+[[ "$RELAY_HOST" == *.* ]] || die "--host must be the full MagicDNS name (e.g. host.tailnet.ts.net), matching the host's RELAY_URL"
 
 step "Checking this Mac"
 [[ "$(uname -s)" == "Darwin" ]] || die "this script is for macOS"
@@ -68,9 +69,10 @@ fi
 "$TS_CLI" status >/dev/null 2>&1 || die "Tailscale is not connected; open Tailscale and sign in"
 
 step "Checking the host relay at ${RELAY_HOST}:${RELAY_PORT}"
-if ! curl --silent --fail --max-time 10 -H 'Accept: application/nostr+json' \
-    "http://${RELAY_HOST}:${RELAY_PORT}/" >/dev/null; then
-    die "cannot reach http://${RELAY_HOST}:${RELAY_PORT} — is the host online in Tailscale and the relay running?"
+# Plain GET goes through the relay's host-to-community binding, so a host name
+# that doesn't match the host's RELAY_URL fails here instead of after the build.
+if ! curl --silent --fail --max-time 10 -o /dev/null "http://${RELAY_HOST}:${RELAY_PORT}/"; then
+    die "no community at http://${RELAY_HOST}:${RELAY_PORT} — host offline in Tailscale, relay down, or --host differs from the host's RELAY_URL"
 fi
 
 step "Fetching Buzz (${PINNED_REF}) into ${INSTALL_DIR}"

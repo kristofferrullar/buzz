@@ -4,11 +4,17 @@ A guest connects to a relay running on the host's machine, and neither needs
 to be on the same local network. The guest builds the desktop app from this
 pinned branch, so later pushes to `main` don't change what the guest runs.
 
+To have an AI coding agent do the setup, use the prompts in
+[AGENT_HANDOFF.md](AGENT_HANDOFF.md).
+
 ## Host (the machine running the relay)
 
-1. Set `RELAY_URL=ws://<your-magicdns-name>:3000` in `.env` and restart the relay.
-   Connect your own desktop and mobile apps with that same URL, because NIP-42
-   auth rejects any other relay URL.
+1. Make sure `RELAY_URL` in `.env` is `ws://<your-magicdns-name>:3000`, and
+   connect your own apps with that same URL. NIP-42 auth rejects any other URL.
+   **Warning:** the relay keys each community to the host in `RELAY_URL`. If
+   you switch it (for example from `localhost`), a new, empty community is
+   created on restart, and your existing channels and members stay under the
+   old URL. Decide on this before switching.
 2. Run `scripts/join-over-tailscale/check-host.sh`. It verifies Tailscale, the
    relay URL, the bind address and reachability, then prints what to send.
 3. Invite the guest to your tailnet, or share this machine with them.
