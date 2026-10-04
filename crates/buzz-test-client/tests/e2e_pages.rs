@@ -1290,6 +1290,116 @@ async fn deleting_page_events_repairs_the_head() {
     );
 }
 
+/// NIP-PG rule 9: a `#h`-less filter for revisions is scoped to the channels the
+/// reader can access, newest first, and pages with `until`. The author filter
+/// only keeps this test's events apart from other tests' pages in open channels;
+/// the query path is the same as the plain `{"kinds":[52000]}` library read.
+#[tokio::test]
+#[ignore]
+async fn hless_library_read_is_access_scoped_newest_first_and_until_paged() {
+    let url = relay_url();
+    let mut alice = Session::connect(&url).await;
+    let mut bob = Session::connect(&url).await;
+    let open = alice.create_channel("open").await;
+    let secret = alice.create_channel("private").await;
+
+    // Interleave open and private pages so a window crosses both.
+    let mut open_events = Vec::new();
+    let mut secret_events = Vec::new();
+    for n in 0..4 {
+        let page = Uuid::new_v4();
+        let first = alice
+            .publish(revision(
+                open,
+                page,
+                &format!("open {n}"),
+                "a",
+                PageEdit::Create,
+            ))
+            .await;
+        let second = alice
+            .publish(revision(
+                open,
+                page,
+                &format!("open {n}"),
+                "b",
+                edit(&first),
+            ))
+            .await;
+        open_events.extend([first, second]);
+        let hidden = alice
+            .publish(revision(
+                secret,
+                Uuid::new_v4(),
+                &format!("secret {n}"),
+                "s",
+                PageEdit::Create,
+            ))
+            .await;
+        secret_events.push(hidden);
+    }
+    // Let the post-commit fan-out of the last writes settle, so a read's history
+    // order is not interleaved with a live duplicate of a just-written event.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let alice_pubkey = alice.keys.public_key();
+    let library = |limit: usize, until: Option<Timestamp>| {
+        let filter = Filter::new()
+            .kind(kind(KIND_PAGE_REVISION))
+            .author(alice_pubkey)
+            .limit(limit);
+        match until {
+            Some(until) => filter.until(until),
+            None => filter,
+        }
+    };
+
+    // The member sees every page; the non-member sees only the open channel's.
+    let all = alice.query(library(100, None)).await;
+    assert_eq!(all.len(), open_events.len() + secret_events.len());
+    let seen_by_bob = bob.query(library(100, None)).await;
+    assert_eq!(ids(&seen_by_bob), ids(&open_events));
+    assert!(
+        seen_by_bob
+            .iter()
+            .all(|e| !ids(&secret_events).contains(&e.id)),
+        "a private channel's pages must not reach a non-member"
+    );
+
+    // Newest first.
+    let times: Vec<_> = seen_by_bob.iter().map(|e| e.created_at).collect();
+    assert!(
+        times.windows(2).all(|pair| pair[0] >= pair[1]),
+        "library must be newest first: {times:?}"
+    );
+
+    // Page the non-member's library three events at a time with `until`; a
+    // boundary event may repeat, so dedupe by id.
+    let mut collected: Vec<Event> = Vec::new();
+    let mut until = None;
+    for _ in 0..10 {
+        let window = bob.query(library(3, until)).await;
+        let Some(oldest) = window.last().map(|e| e.created_at) else {
+            break;
+        };
+        let before = collected.len();
+        for event in window {
+            if !collected.iter().any(|seen| seen.id == event.id) {
+                collected.push(event);
+            }
+        }
+        if collected.len() == before {
+            break;
+        }
+        until = Some(oldest);
+    }
+    assert_eq!(
+        ids(&collected),
+        ids(&open_events),
+        "paging must reach every page"
+    );
+}
+
 // -- Community isolation --------------------------------------------------------
 
 fn database_url() -> String {
