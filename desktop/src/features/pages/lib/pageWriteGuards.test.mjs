@@ -35,17 +35,18 @@ test("the title limit is in bytes: 256 pass, 257 fail, multi-byte counts by widt
     kinds(validateRevisionDraft(draft("a".repeat(256)), head)),
     [],
   );
-  assert.deepEqual(
-    kinds(validateRevisionDraft(draft("a".repeat(257)), head)),
-    ["title-too-long"],
-  );
+  assert.deepEqual(kinds(validateRevisionDraft(draft("a".repeat(257)), head)), [
+    "title-too-long",
+  ]);
   // 128 two-byte characters are exactly 256 bytes; one more is over, even though
   // the character count is far below 256.
-  assert.deepEqual(kinds(validateRevisionDraft(draft("é".repeat(128)), head)), []);
   assert.deepEqual(
-    kinds(validateRevisionDraft(draft("é".repeat(129)), head)),
-    ["title-too-long"],
+    kinds(validateRevisionDraft(draft("é".repeat(128)), head)),
+    [],
   );
+  assert.deepEqual(kinds(validateRevisionDraft(draft("é".repeat(129)), head)), [
+    "title-too-long",
+  ]);
 });
 
 test("the content limit is in bytes: 65536 pass, 65537 fail, multi-byte counts by width", () => {
@@ -53,12 +54,17 @@ test("the content limit is in bytes: 65536 pass, 65537 fail, multi-byte counts b
   const draft = (content) => ({ title: "T", content });
 
   assert.deepEqual(
-    kinds(validateRevisionDraft(draft("a".repeat(PAGE_CONTENT_MAX_BYTES)), head)),
+    kinds(
+      validateRevisionDraft(draft("a".repeat(PAGE_CONTENT_MAX_BYTES)), head),
+    ),
     [],
   );
   assert.deepEqual(
     kinds(
-      validateRevisionDraft(draft("a".repeat(PAGE_CONTENT_MAX_BYTES + 1)), head),
+      validateRevisionDraft(
+        draft("a".repeat(PAGE_CONTENT_MAX_BYTES + 1)),
+        head,
+      ),
     ),
     ["content-too-long"],
   );
@@ -94,7 +100,9 @@ test("an unchanged revision is a no-op, judged on the trimmed title and exact co
   );
   // Padding around the title is not a change.
   assert.deepEqual(
-    kinds(validateRevisionDraft({ title: "  Plan ", content: "# Plan\n" }, head)),
+    kinds(
+      validateRevisionDraft({ title: "  Plan ", content: "# Plan\n" }, head),
+    ),
     ["unchanged"],
   );
   // Any content difference, even trailing whitespace, is a change.
@@ -103,7 +111,9 @@ test("an unchanged revision is a no-op, judged on the trimmed title and exact co
     [],
   );
   assert.deepEqual(
-    kinds(validateRevisionDraft({ title: "Plan 2", content: "# Plan\n" }, head)),
+    kinds(
+      validateRevisionDraft({ title: "Plan 2", content: "# Plan\n" }, head),
+    ),
     [],
   );
   // Creating has no head, so nothing is "unchanged".
@@ -142,7 +152,9 @@ test("a suggestion carries content only: title edits are ignored, content limits
   const head = { title: "T", content: "c" };
 
   assert.deepEqual(
-    kinds(validateSuggestionDraft({ title: "Other title", content: "c" }, head)),
+    kinds(
+      validateSuggestionDraft({ title: "Other title", content: "c" }, head),
+    ),
     ["unchanged"],
   );
   assert.deepEqual(
@@ -164,7 +176,11 @@ test("every issue has distinct, specific wording", () => {
   const messages = [
     describePageDraftIssue({ kind: "title-blank" }),
     describePageDraftIssue({ kind: "title-too-long", bytes: 300, max: 256 }),
-    describePageDraftIssue({ kind: "content-too-long", bytes: 70_000, max: 65_536 }),
+    describePageDraftIssue({
+      kind: "content-too-long",
+      bytes: 70_000,
+      max: 65_536,
+    }),
     describePageDraftIssue({ kind: "unchanged" }),
   ];
   assert.equal(new Set(messages).size, messages.length);

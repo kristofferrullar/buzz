@@ -20,7 +20,12 @@ const head = {
   content: "# head",
   suggestionId: null,
 };
-const older = { ...head, id: "o".repeat(64), content: "# older", createdAt: 50 };
+const older = {
+  ...head,
+  id: "o".repeat(64),
+  content: "# older",
+  createdAt: 50,
+};
 
 const suggestion = {
   ...ids,

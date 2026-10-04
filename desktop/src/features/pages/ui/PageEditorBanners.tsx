@@ -85,14 +85,14 @@ export function RecoveryBanner({
       </h3>
       {variant === "conflict" && message ? <p>{message}</p> : null}
       {variant === "already-saved" ? (
-        <p>
-          The page already contains exactly what you wrote. {newer}
-        </p>
+        <p>The page already contains exactly what you wrote. {newer}</p>
       ) : null}
       {variant === "page-exists" ? (
         <p>An earlier save went through, so there is nothing more to create.</p>
       ) : null}
-      {!settled && newer ? <p data-testid="page-editor-newer">{newer}</p> : null}
+      {!settled && newer ? (
+        <p data-testid="page-editor-newer">{newer}</p>
+      ) : null}
       {!settled ? (
         <p className="text-muted-foreground">
           Your text replaces theirs when you save. After reloading, check
@@ -163,7 +163,10 @@ type DiscardPromptProps = {
  * Inline confirmation before unsaved text is thrown away. Focus lands on the
  * safe choice, and Escape (handled by the editor) means "keep editing".
  */
-export function DiscardPrompt({ onDiscard, onKeepEditing }: DiscardPromptProps) {
+export function DiscardPrompt({
+  onDiscard,
+  onKeepEditing,
+}: DiscardPromptProps) {
   const keepRef = React.useRef<HTMLButtonElement>(null);
   React.useEffect(() => {
     keepRef.current?.focus();

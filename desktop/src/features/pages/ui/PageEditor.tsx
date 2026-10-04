@@ -147,11 +147,20 @@ export function PageEditor({
   const contentBytes = utf8ByteLength(draft.content);
   const overLimit = contentBytes > PAGE_CONTENT_MAX_BYTES;
   const visibleIssues = editor.revisionIssues;
-  const recovery = ((): "conflict" | "behind" | "already-saved" | "page-exists" | null => {
-    if (phase.kind === "conflict" && phase.error.conflictReason === "page-exists") {
+  const recovery = (():
+    | "conflict"
+    | "behind"
+    | "already-saved"
+    | "page-exists"
+    | null => {
+    if (
+      phase.kind === "conflict" &&
+      phase.error.conflictReason === "page-exists"
+    ) {
       return "page-exists";
     }
-    if (!creating && editor.alreadySaved && editor.behind) return "already-saved";
+    if (!creating && editor.alreadySaved && editor.behind)
+      return "already-saved";
     if (phase.kind === "conflict") return "conflict";
     if (editor.behind) return "behind";
     return null;
@@ -195,18 +204,24 @@ export function PageEditor({
 
       {leadingFields}
 
-      <label className="block space-y-1.5 text-sm font-medium">
-        <span>Title</span>
+      <div className="space-y-1.5">
+        <label
+          className="block text-sm font-medium"
+          htmlFor={`${ids.count}-title`}
+        >
+          Title
+        </label>
         <Input
           aria-describedby={ids.hint}
           data-testid="page-editor-title"
+          id={`${ids.count}-title`}
           onChange={(event) => editor.setTitle(event.target.value)}
           placeholder="Page title"
           readOnly={saving}
           ref={titleRef}
           value={draft.title}
         />
-      </label>
+      </div>
 
       <div className="grid gap-4 md:grid-cols-2">
         <div className="min-w-0 space-y-1.5">
@@ -241,11 +256,8 @@ export function PageEditor({
           {creating ? (
             <p className="text-sm font-medium">Preview</p>
           ) : (
-            <div
-              aria-label="Preview or changes"
-              className="flex gap-1"
-              role="group"
-            >
+            <fieldset className="m-0 flex min-w-0 gap-1 border-0 p-0">
+              <legend className="sr-only">Show preview or changes</legend>
               <Button
                 aria-pressed={pane === "preview"}
                 data-testid="page-editor-pane-preview"
@@ -266,7 +278,7 @@ export function PageEditor({
               >
                 Changes
               </Button>
-            </div>
+            </fieldset>
           )}
           <div
             className="min-h-72 overflow-auto rounded-lg border border-border/70 bg-muted/20 px-4 py-3"
@@ -306,7 +318,9 @@ export function PageEditor({
       >
         {visibleIssues.map((issue) => (
           <p
-            className={issue.kind === "unchanged" ? undefined : "text-destructive"}
+            className={
+              issue.kind === "unchanged" ? undefined : "text-destructive"
+            }
             data-issue={issue.kind}
             key={issue.kind}
           >
@@ -373,9 +387,7 @@ export function PageEditor({
             type="button"
             variant="outline"
           >
-            {savingAction === "suggest"
-              ? "Sending…"
-              : "Suggest instead"}
+            {savingAction === "suggest" ? "Sending…" : "Suggest instead"}
           </Button>
         )}
         <Button

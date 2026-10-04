@@ -118,7 +118,8 @@ export function editorReducer(
         draft: { ...state.draft, ...event.patch },
         // Editing after a plain failure clears it; a conflict stays until the
         // draft is rebased, because typing does not make the head current.
-        phase: state.phase.kind === "failed" ? { kind: "editing" } : state.phase,
+        phase:
+          state.phase.kind === "failed" ? { kind: "editing" } : state.phase,
         confirmingDiscard: false,
       };
     }

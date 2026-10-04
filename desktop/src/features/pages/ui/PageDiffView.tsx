@@ -30,12 +30,7 @@ export function PageDiffView({
   );
 
   return (
-    <div
-      aria-label={label}
-      className="space-y-2"
-      data-testid="page-diff"
-      role="region"
-    >
+    <section aria-label={label} className="space-y-2" data-testid="page-diff">
       {diff.status === "changed" ? (
         <>
           <p
@@ -70,6 +65,6 @@ export function PageDiffView({
           These versions differ too much to compare line by line.
         </p>
       )}
-    </div>
+    </section>
   );
 }

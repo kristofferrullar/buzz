@@ -54,7 +54,10 @@ test("conflict sub-reasons are distinguished", () => {
 });
 
 test("a deleted page cannot be saved to and is not a recoverable conflict", () => {
-  for (const text of ["conflict: page is deleted", "conflict: page does not exist"]) {
+  for (const text of [
+    "conflict: page is deleted",
+    "conflict: page does not exist",
+  ]) {
     const result = classifyPageWriteError(new Error(text));
     assert.equal(result.kind, "page-gone");
     assert.match(result.message, /Copy your text/);
@@ -77,7 +80,9 @@ test("a closed or stale suggestion is its own outcome", () => {
 
 test("no-op, oversize title and oversize content have their own messages", () => {
   const noop = classifyPageWriteError(
-    new Error("invalid: no-op revision (title and content equal the page head)"),
+    new Error(
+      "invalid: no-op revision (title and content equal the page head)",
+    ),
   );
   assert.equal(noop.kind, "no-change");
 
@@ -89,7 +94,9 @@ test("no-op, oversize title and oversize content have their own messages", () =>
   assert.match(title.message, /256/);
 
   const content = classifyPageWriteError(
-    new Error("invalid: page content exceeds maximum size of 65536 bytes (got 70000)"),
+    new Error(
+      "invalid: page content exceeds maximum size of 65536 bytes (got 70000)",
+    ),
   );
   assert.equal(content.kind, "too-large");
   assert.match(content.message, /64 KiB/);
@@ -165,7 +172,9 @@ test("a failed accept or reject is described for a reviewer, not an editor with 
   }
   // Closed by someone else and a moved head read the same to a reviewer.
   assert.equal(
-    describeDecisionFailure(classifyPageWriteError("conflict: stale prev (head x)")),
+    describeDecisionFailure(
+      classifyPageWriteError("conflict: stale prev (head x)"),
+    ),
     describeDecisionFailure(
       classifyPageWriteError("conflict: suggestion is already resolved"),
     ),

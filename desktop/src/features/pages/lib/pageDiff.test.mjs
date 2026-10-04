@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { PAGE_DIFF_FILE_NAME, buildPageDiff, normalizeForDiff } from "./pageDiff.ts";
+import {
+  PAGE_DIFF_FILE_NAME,
+  buildPageDiff,
+  normalizeForDiff,
+} from "./pageDiff.ts";
 
 test("normalizeForDiff unifies line endings and the final newline", () => {
   assert.equal(normalizeForDiff(""), "");

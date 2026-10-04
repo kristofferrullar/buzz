@@ -18,7 +18,11 @@ const conflict = {
   message: "Someone else changed this page",
   detail: "conflict: stale prev",
 };
-const offline = { kind: "offline", message: "offline", detail: "relay unreachable" };
+const offline = {
+  kind: "offline",
+  message: "offline",
+  detail: "relay unreachable",
+};
 
 function open(overrides = {}) {
   return openEditor({
@@ -59,13 +63,20 @@ test("a conflict keeps the draft byte-for-byte and stays until the draft is reba
   );
   assert.deepEqual(state.phase, { kind: "saving", action: "save" });
 
-  state = run(state, { type: "failed", generation: state.generation, error: conflict });
+  state = run(state, {
+    type: "failed",
+    generation: state.generation,
+    error: conflict,
+  });
   assert.equal(state.phase.kind, "conflict");
   assert.deepEqual(state.draft, typed);
   assert.equal(state.baseRevisionId, HEAD1);
 
   // Typing more does not make the head current, so the conflict remains.
-  state = run(state, { type: "edited", patch: { content: `${typed.content}!` } });
+  state = run(state, {
+    type: "edited",
+    patch: { content: `${typed.content}!` },
+  });
   assert.equal(state.phase.kind, "conflict");
 });
 
@@ -112,21 +123,33 @@ test("a plain failure keeps the draft and clears when the user edits again", () 
 test("a late result from an older generation is dropped (fence)", () => {
   // Submit at generation 0, then (after a conflict) rebase to generation 1 and
   // submit again. The first request's late failure must not touch the new state.
-  let state = run(
+  const state = run(
     open(),
     { type: "edited", patch: { content: "x" } },
     { type: "submitted", action: "save" },
     { type: "failed", generation: 0, error: conflict },
-    { type: "rebased", baseRevisionId: HEAD2, pristine: { title: "Plan", content: "v2" } },
+    {
+      type: "rebased",
+      baseRevisionId: HEAD2,
+      pristine: { title: "Plan", content: "v2" },
+    },
     { type: "submitted", action: "save" },
   );
   assert.equal(state.generation, 1);
   assert.equal(isCurrentGeneration(state, 0), false);
 
-  const afterStale = run(state, { type: "failed", generation: 0, error: offline });
+  const afterStale = run(state, {
+    type: "failed",
+    generation: 0,
+    error: offline,
+  });
   assert.deepEqual(afterStale, state, "the stale failure changed nothing");
 
-  const afterCurrent = run(state, { type: "failed", generation: 1, error: offline });
+  const afterCurrent = run(state, {
+    type: "failed",
+    generation: 1,
+    error: offline,
+  });
   assert.equal(afterCurrent.phase.kind, "failed");
 });
 
@@ -156,7 +179,10 @@ test("the draft is frozen and rebasing is refused while a write is in flight", (
     }),
     saving,
   );
-  assert.deepEqual(run(saving, { type: "submitted", action: "suggest" }), saving);
+  assert.deepEqual(
+    run(saving, { type: "submitted", action: "suggest" }),
+    saving,
+  );
   assert.deepEqual(run(saving, { type: "discard-requested" }), saving);
 });
 
@@ -175,7 +201,10 @@ test("discarding asks first, and typing or cancelling dismisses the prompt", () 
   let state = run(open(), { type: "edited", patch: { content: "x" } });
   state = run(state, { type: "discard-requested" });
   assert.equal(state.confirmingDiscard, true);
-  assert.equal(run(state, { type: "discard-cancelled" }).confirmingDiscard, false);
+  assert.equal(
+    run(state, { type: "discard-cancelled" }).confirmingDiscard,
+    false,
+  );
   assert.equal(
     run(state, { type: "edited", patch: { content: "xy" } }).confirmingDiscard,
     false,

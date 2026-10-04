@@ -31,7 +31,11 @@ import {
 } from "@/features/agents/observerRelayStore";
 import { switchManagedAgentModel } from "@/shared/api/agentControl";
 import { mockSearchHitMatches } from "./e2eBridgeSearch.ts";
-import { createMockPageStore, MOCK_PAGE_KINDS } from "./e2eBridgePages.ts";
+import {
+  createMockPageStore,
+  MOCK_PAGE_KINDS,
+  type MockPageWriteFault,
+} from "./e2eBridgePages.ts";
 export { mockSearchHitMatches };
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type {
@@ -1340,6 +1344,8 @@ declare global {
     __BUZZ_E2E_PUSH_MOCK_PAGE_EVENT__?: (event: RelayEvent) => void;
     /** While true, page REQs are answered with CLOSED (a failed relay read). */
     __BUZZ_E2E_FAIL_PAGE_QUERIES__?: boolean;
+    /** Arms a one-shot failure for the next page write command. */
+    __BUZZ_E2E_PAGE_WRITE_FAULT__?: MockPageWriteFault | null;
     /** Replace an existing feed item by id (or push if not found) and fire the updated event. */
     __BUZZ_E2E_REPLACE_MOCK_FEED_ITEM__?: (
       oldId: string,
@@ -3319,6 +3325,24 @@ const mockPageStore = createMockPageStore({
   bob: BOB_PUBKEY,
   viewer: MOCK_IDENTITY_PUBKEY,
 });
+
+/** Mock of the page write commands: relay-faithful checks, then a live event. */
+async function handleMockPageWrite(
+  command: string,
+  args: Record<string, unknown>,
+): Promise<{ event_id: string }> {
+  const fault = window.__BUZZ_E2E_PAGE_WRITE_FAULT__ ?? null;
+  window.__BUZZ_E2E_PAGE_WRITE_FAULT__ = null; // one-shot
+  if (fault?.kind === "delay") {
+    await new Promise((resolve) => window.setTimeout(resolve, fault.ms));
+  }
+  const stored = mockPageStore.publish(command, args, {
+    fault,
+    viewerPubkey: MOCK_IDENTITY_PUBKEY,
+  });
+  emitMockLiveEvent(String(args.channelId), stored);
+  return { event_id: stored.id };
+}
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
 const mockAuthResponses: Array<{ success: boolean; message: string }> = [];
@@ -14779,6 +14803,13 @@ export function maybeInstallE2eTauriMocks() {
         // The spec only verifies UI state, not the submitted request shape;
         // returning null mirrors the Rust submit_event success path.
         return null;
+      case "publish_page_revision":
+      case "publish_page_suggestion":
+      case "reject_page_suggestion":
+        return handleMockPageWrite(
+          command,
+          (payload ?? {}) as Record<string, unknown>,
+        );
       case "set_canvas":
         return { ok: true, event_id: mockEventId() };
       case "get_canvas": {

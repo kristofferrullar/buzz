@@ -141,10 +141,8 @@ export function usePageEditor({
   target,
 }: UsePageEditorArgs) {
   const writer = usePageWriter(communityId);
-  const [state, dispatch] = React.useReducer(
-    editorReducer,
-    undefined,
-    () => initialState(communityId, target),
+  const [state, dispatch] = React.useReducer(editorReducer, undefined, () =>
+    initialState(communityId, target),
   );
 
   // Latest values for async continuations and unmount cleanup.
@@ -215,6 +213,7 @@ export function usePageEditor({
     });
   }, []);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the draft is the trigger that restarts the debounce; the write itself reads the latest state from a ref.
   React.useEffect(() => {
     if (finishedRef.current) return;
     if (!dirty) {
@@ -292,11 +291,7 @@ export function usePageEditor({
       if (result.ok) {
         // Clear by content, not unconditionally: this may resolve after the user
         // moved on and typed a newer draft that must survive.
-        clearPageDraftIfSaved(
-          browserDraftStorage(),
-          draftKeyRef.current,
-          text,
-        );
+        clearPageDraftIfSaved(browserDraftStorage(), draftKeyRef.current, text);
         if (
           mountedRef.current &&
           isCurrentGeneration(stateRef.current, generation)

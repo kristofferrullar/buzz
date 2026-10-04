@@ -61,7 +61,11 @@ test("creating a page sends a null prev; applying a suggestion names it", async 
 test("suggest and reject use their own commands and exactly the fields the SDK builders need", async () => {
   const { calls, invoke } = recordingInvoke(() => ({ event_id: "e" }));
   const writer = createPageWriter(invoke);
-  await writer.publishSuggestion({ ...ids, base: "a".repeat(64), content: "c" });
+  await writer.publishSuggestion({
+    ...ids,
+    base: "a".repeat(64),
+    content: "c",
+  });
   await writer.rejectSuggestion({ ...ids, suggestion: "b".repeat(64) });
 
   assert.deepEqual(calls, [

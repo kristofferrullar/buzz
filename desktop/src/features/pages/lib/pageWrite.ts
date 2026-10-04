@@ -8,10 +8,7 @@
  * throwing, so a caller cannot forget the failure branch, and a rejection is
  * classified (`conflict:`, size, permission, ...) rather than flattened.
  */
-import {
-  classifyPageWriteError,
-  type PageWriteError,
-} from "./pageWriteErrors";
+import { classifyPageWriteError, type PageWriteError } from "./pageWriteErrors";
 
 /** Invokes a Tauri command; production binds `invokeTauri`. */
 export type PageInvoke = <T>(

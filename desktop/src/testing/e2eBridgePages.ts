@@ -523,7 +523,11 @@ export function createMockPageStore(
           );
         }
       }
-      if (head && tagValue(head, "title") === title && head.content === content) {
+      if (
+        head &&
+        tagValue(head, "title") === title &&
+        head.content === content
+      ) {
         reject(
           "invalid: no-op revision (title and content equal the page head)",
         );

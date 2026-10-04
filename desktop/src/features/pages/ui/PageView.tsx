@@ -62,11 +62,12 @@ export function PageView({
    * read must not look like "the head is unchanged": the editor would rebase
    * onto stale data and the next save would conflict again, silently.
    */
-  const loadLatestHead = React.useCallback(async (): Promise<PageRevision | null> => {
-    const result = await refetch();
-    if (result.isError) return null;
-    return result.data?.detail?.head ?? null;
-  }, [refetch]);
+  const loadLatestHead =
+    React.useCallback(async (): Promise<PageRevision | null> => {
+      const result = await refetch();
+      if (result.isError) return null;
+      return result.data?.detail?.head ?? null;
+    }, [refetch]);
 
   return (
     <div

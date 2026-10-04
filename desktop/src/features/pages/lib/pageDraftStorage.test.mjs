@@ -48,7 +48,10 @@ test("keys are scoped by community, channel and page and are unambiguous", () =>
   assert.notEqual(key, pageDraftKey("c1", "ch", "p2"));
   // Parts that contain the delimiter cannot collide with a different split.
   assert.notEqual(pageDraftKey("a:b", "c", "d"), pageDraftKey("a", "b:c", "d"));
-  assert.notEqual(pageDraftKey("c1", null, null), pageDraftKey("c1", "ch", null));
+  assert.notEqual(
+    pageDraftKey("c1", null, null),
+    pageDraftKey("c1", "ch", null),
+  );
 });
 
 test("a draft round-trips", () => {
@@ -107,7 +110,10 @@ test("a finished save clears only the draft it saved, never newer typing", () =>
 
   // The user kept typing after the save started: the stored draft moved on.
   writePageDraft(storage, key, { ...draft, content: "# body, then more" });
-  clearPageDraftIfSaved(storage, key, { title: draft.title, content: draft.content });
+  clearPageDraftIfSaved(storage, key, {
+    title: draft.title,
+    content: draft.content,
+  });
   assert.equal(readPageDraft(storage, key)?.content, "# body, then more");
 
   // Stored draft equals what was saved: cleared.
