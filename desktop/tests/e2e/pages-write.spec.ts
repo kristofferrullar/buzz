@@ -399,6 +399,47 @@ test("a newer head arriving while editing is flagged before any save fails", asy
   expect(writes[0].payload?.prev).toBe("f7".repeat(32));
 });
 
+test("saving on a head that has since moved is refused, never an overwrite", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await openPage(page, Q4_TITLE);
+  await startEditing(page);
+  await waitForLiveSubscription(page);
+  const draft = `${Q4_HEAD_CONTENT}\n- written on the old head`;
+  await contentField(page).fill(draft);
+
+  await pushRevision(page, {
+    content: "# Q4 Plan\n\nAlice's newer version.",
+    id: "f6".repeat(32),
+    prev: MOCK_PAGE_EVENT_IDS.q4Head,
+  });
+  await expect(page.getByTestId("page-editor-recovery")).toHaveAttribute(
+    "data-variant",
+    "behind",
+  );
+
+  // The editor knows it is behind and still lets the relay decide (it is the
+  // authority); the revision names the head the text was written against, so
+  // the relay refuses it instead of silently replacing alice's version.
+  await saveButton(page).click();
+  await expect(page.getByTestId("page-editor-recovery")).toHaveAttribute(
+    "data-variant",
+    "conflict",
+  );
+  await expect(contentField(page)).toHaveValue(draft);
+
+  const writes = await pageWrites(page);
+  expect(writes).toHaveLength(1);
+  expect(writes[0].payload?.prev).toBe(MOCK_PAGE_EVENT_IDS.q4Head);
+  // Alice's version is still the head.
+  await page.getByTestId("page-editor-recovery-discard").click();
+  await page.getByTestId("page-editor-confirm-discard").click();
+  await expect(page.getByTestId("page-content")).toContainText(
+    "Alice's newer version.",
+  );
+});
+
 test("a save that already landed is recognised instead of conflicting forever", async ({
   page,
 }) => {

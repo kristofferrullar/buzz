@@ -35,11 +35,16 @@ upstream stays routine and never means rebuilding the feature.
 | `crates/buzz-cli/src/commands/mod.rs` | `pub mod pages;` and its dispatch |
 | `desktop/src/shared/constants/kinds.ts` | mirrored kind constants |
 | `mobile/lib/shared/relay/nostr_models.dart` | mirrored kind constants |
-| desktop sidebar, routes, `e2eBridge.ts` | one entry each |
+| desktop sidebar, routes, `e2eBridge.ts` | one entry each (`e2eBridge.ts`: the page query branch, the three page write commands and one fault hook) |
+| `desktop/src-tauri/src/commands/mod.rs`, `desktop/src-tauri/src/lib.rs` | `mod pages;` / `pub use pages::*;` and the three command names in `invoke_handler` |
+| `desktop/package.json`, `pnpm-lock.yaml` | the `diff` dependency (line diffs for suggestion review); already in the lockfile as a transitive of the router plugin |
+| `desktop/playwright.config.ts` | two `smoke` spec entries (`pages`, `pages-write`) |
 | `preview-features.json` | one `pages` entry |
 
 Everything else lives in new files: `crates/buzz-db/src/store/page.rs`,
-`crates/buzz-cli/src/commands/pages.rs`, `desktop/src/features/pages/`, and
+`crates/buzz-cli/src/commands/pages.rs`, `desktop/src/features/pages/`,
+`desktop/src-tauri/src/commands/pages.rs` (+ `pages/builders.rs`, which only
+delegates tag shapes to `buzz-sdk`), and
 `crates/buzz-test-client/tests/e2e_pages.rs`.
 
 ## Sync routine
