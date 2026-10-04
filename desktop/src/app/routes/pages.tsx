@@ -3,6 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 
 import { usePagesAuthorLabels } from "@/app/pages/usePagesAuthorLabels";
 import { useCommunities } from "@/features/communities/useCommunities";
+import { DiffViewer } from "@/features/messages/ui/DiffViewer";
 import type { PageSelection } from "@/features/pages/types";
 import { FeatureGate } from "@/shared/features";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
@@ -82,6 +83,7 @@ function PagesRouteScreen() {
   return (
     <React.Suspense fallback={<BuzzLoadingState fill label="Loading pages" />}>
       <PagesScreen
+        DiffViewer={DiffViewer}
         communityId={activeCommunity?.id ?? null}
         onClosePage={handleClosePage}
         onOpenPage={handleOpenPage}

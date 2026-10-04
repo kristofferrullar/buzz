@@ -1,30 +1,24 @@
-import { ChevronRight, FileText, RefreshCw } from "lucide-react";
+import { ChevronRight, FileText, Plus, RefreshCw } from "lucide-react";
 import * as React from "react";
 
-import type { Channel } from "@/shared/api/types";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { formatItemTimestamp } from "@/shared/lib/datetime";
 import { Button } from "@/shared/ui/button";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { usePagesLibraryQuery } from "../hooks";
+import { channelLabelFor } from "../lib/channelWrite";
 import type { PageSummary } from "../lib/pageModel";
 import type { PageSelection, PagesHostBindings } from "../types";
 import { ROVING_ITEM_PROPS, useRovingList } from "./useRovingList";
 
-/**
- * Shown for a page whose channel is not in the viewer's channel list, e.g. an
- * open channel they have not joined. The relay still lets them read it.
- */
-const UNKNOWN_CHANNEL_LABEL = "another channel";
-
-function channelLabelFor(channel: Channel | undefined): string {
-  if (!channel) return UNKNOWN_CHANNEL_LABEL;
-  return channel.channelType === "dm" ? channel.name : `#${channel.name}`;
-}
-
-type SpaceLibraryProps = PagesHostBindings & {
+type SpaceLibraryProps = Pick<PagesHostBindings, "useAuthorLabels"> & {
   communityId: string | null;
+  /**
+   * Starts creating a page. Omitted when the viewer can write in no channel, so
+   * a read-only viewer sees no create control at all.
+   */
+  onNewPage?: () => void;
   onOpenPage: (selection: PageSelection) => void;
   /**
    * Page key (see `pageKey`) of the page the viewer just came back from. Focus
@@ -40,6 +34,7 @@ type SpaceLibraryProps = PagesHostBindings & {
  */
 export function SpaceLibrary({
   communityId,
+  onNewPage,
   onOpenPage,
   restoreFocusKey = null,
   useAuthorLabels,
@@ -92,19 +87,32 @@ export function SpaceLibrary({
       <div className="mx-auto w-full max-w-3xl space-y-6">
         <PageHeader
           action={
-            <Button
-              aria-label="Refresh pages"
-              disabled={query.isFetching}
-              onClick={() => void query.refetch()}
-              size="icon"
-              type="button"
-              variant="ghost"
-            >
-              <RefreshCw
-                aria-hidden
-                className={`h-4 w-4 ${query.isFetching ? "animate-spin" : ""}`}
-              />
-            </Button>
+            <div className="flex items-center gap-1">
+              {onNewPage ? (
+                <Button
+                  data-testid="pages-new-page"
+                  onClick={onNewPage}
+                  size="sm"
+                  type="button"
+                >
+                  <Plus aria-hidden className="h-4 w-4" />
+                  New page
+                </Button>
+              ) : null}
+              <Button
+                aria-label="Refresh pages"
+                disabled={query.isFetching}
+                onClick={() => void query.refetch()}
+                size="icon"
+                type="button"
+                variant="ghost"
+              >
+                <RefreshCw
+                  aria-hidden
+                  className={`h-4 w-4 ${query.isFetching ? "animate-spin" : ""}`}
+                />
+              </Button>
+            </div>
           }
           description="Documents from every channel you can read."
           title="Space"
