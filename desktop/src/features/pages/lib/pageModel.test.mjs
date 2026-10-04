@@ -451,6 +451,23 @@ test("history is newest first, marks the head, and flags revisions off the head 
   assert.equal(detail.createdAt, 100);
 });
 
+test("with several roots the creator is the earliest root, ties to the lowest event id", () => {
+  const detail = (events) =>
+    buildPageDetail({ channelId: H, pageId: D }, events);
+  const earliest = detail([
+    revision({ id: hex("1"), createdAt: 200, pubkey: BOB }),
+    revision({ id: hex("2"), createdAt: 100, pubkey: ALICE }),
+  ]);
+  assert.equal(earliest.createdBy, ALICE);
+  assert.equal(earliest.createdAt, 100);
+
+  const tied = detail([
+    revision({ id: hex("e"), createdAt: 100, pubkey: BOB }),
+    revision({ id: hex("5"), createdAt: 100, pubkey: ALICE }),
+  ]);
+  assert.equal(tied.createdBy, ALICE);
+});
+
 test("pageKey is unambiguous for ids that contain delimiters", () => {
   assert.notEqual(
     pageKey({ channelId: "a:b", pageId: "c" }),

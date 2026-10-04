@@ -389,7 +389,11 @@ export function buildPageDetail(
   }));
   const root = revisions
     .filter((revision) => revision.prev === null)
-    .sort((left, right) => compareNewestFirst(right, left))[0];
+    // Several roots: the earliest, ties to the lowest event id (NIP-PG).
+    .sort(
+      (left, right) =>
+        left.createdAt - right.createdAt || left.id.localeCompare(right.id),
+    )[0];
   return {
     channelId: identity.channelId,
     pageId: identity.pageId,
