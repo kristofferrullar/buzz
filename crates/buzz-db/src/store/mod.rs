@@ -26,6 +26,8 @@ pub mod feed;
 pub mod git_repo;
 /// Community moderation: reports, bans/timeouts, audit actions.
 pub mod moderation;
+/// Pages head index (NIP-PG): CAS head advance, library listing, rebuild by replay.
+pub mod page;
 /// Monthly table partition management.
 pub mod partition;
 /// Buzz product-feedback sidecar persistence.

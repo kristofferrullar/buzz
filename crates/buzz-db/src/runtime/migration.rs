@@ -14,6 +14,10 @@ use crate::Result;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
+/// Proofs for the fork-private pages migration (docs/pages-fork-upgrade.md, rule 5).
+#[cfg(test)]
+mod pages_fork_tests;
+
 /// Run all pending Buzz database migrations.
 ///
 /// The entire run holds the exclusive [`SCHEMA_DESTRUCTION_LOCK_KEY`] session
@@ -699,7 +703,11 @@ mod postgres_tests {
 
     #[test]
     fn embedded_migrator_contains_consolidated_initial_schema() {
-        let mut migrations: Vec<_> = MIGRATOR.iter().collect();
+        // Fork-private migrations (>= 9000) are covered by `pages_fork_tests`.
+        let mut migrations: Vec<_> = MIGRATOR
+            .iter()
+            .filter(|m| m.version < pages_fork_tests::FORK_PRIVATE_VERSION_FLOOR)
+            .collect();
         migrations.sort_by_key(|migration| migration.version);
 
         assert_eq!(migrations.len(), 44);
@@ -2753,6 +2761,7 @@ mod postgres_tests {
         );
 
         // The deletion catalog must validate with ledger relations gone.
+        pages_fork_tests::apply_fork_private_migrations(&pool).await;
         crate::deletion::DeletionStore::new(pool.clone())
             .validate_catalog()
             .await
