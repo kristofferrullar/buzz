@@ -1377,8 +1377,17 @@ async fn hless_library_read_is_access_scoped_newest_first_and_until_paged() {
     // boundary event may repeat, so dedupe by id.
     let mut collected: Vec<Event> = Vec::new();
     let mut until = None;
-    for _ in 0..10 {
+    for round in 0..10 {
         let window = bob.query(library(3, until)).await;
+        if round == 0 {
+            // The newest events in the channel set are private; access scope is
+            // applied before the limit, so the window is still full.
+            assert_eq!(
+                window.len(),
+                3,
+                "a window must not be shrunk by hidden pages"
+            );
+        }
         let Some(oldest) = window.last().map(|e| e.created_at) else {
             break;
         };
