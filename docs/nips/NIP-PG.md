@@ -30,7 +30,7 @@ Common: `["h", "<channel uuid>"]`, `["d", "<page id, uuid v4>"]`.
 `PAGE_REVISION`
 - `["prev", "<event id of the revision this was based on>"]` — omitted on the
   first revision of a page; required otherwise.
-- `["title", "<utf-8 title>"]` — required.
+- `["title", "<utf-8 title>"]` — required, non-blank, at most 256 bytes.
 - `["suggestion", "<event id>"]` — optional; present when the revision applies
   an accepted suggestion.
 - `content`: markdown, UTF-8.
@@ -51,8 +51,8 @@ Common: `["h", "<channel uuid>"]`, `["d", "<page id, uuid v4>"]`.
    not exist and `prev` is absent). Otherwise the relay rejects with a
    `conflict:` message and stores nothing.
 3. Revisions whose content and title equal the head's are rejected as no-ops.
-4. Content is bounded by the relay's event size limit; oversize is rejected, not
-   truncated.
+4. Content is bounded to 64 KiB (the relay's `max_content_len`); oversize is
+   rejected, not truncated.
 5. A suggestion never changes the head. Any writer may publish one.
 6. A resolution by a writer closes the suggestion for all viewers. An `accepted`
    resolution MUST reference a revision the resolver published.

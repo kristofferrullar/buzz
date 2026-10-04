@@ -30,6 +30,8 @@ pub mod network;
 pub mod nip10;
 /// Agent observer frame helpers.
 pub mod observer;
+/// NIP-PG: page tag names and size limits shared by the SDK and relay.
+pub mod page;
 /// NIP-AB device pairing — crypto primitives, message types, and errors.
 pub mod pairing;
 /// Presence status types shared across crates.

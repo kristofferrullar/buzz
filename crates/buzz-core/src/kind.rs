@@ -603,6 +603,15 @@ pub const KIND_HUDDLE_GUIDELINES: u32 = 48106;
 /// Internal kind for media upload audit entries. Not a relay event kind.
 pub const KIND_MEDIA_UPLOAD: u32 = 49001;
 
+// Pages (52000–52099) — fork-private block, see docs/nips/NIP-PG.md and
+// docs/pages-fork-upgrade.md. Keep all page kinds here so a renumber is one edit.
+/// NIP-PG: Page revision — append-only, `h`-scoped; the newest in the `prev` chain is the head.
+pub const KIND_PAGE_REVISION: u32 = 52000;
+/// NIP-PG: Page suggestion — a proposed full-content edit against a base revision.
+pub const KIND_PAGE_SUGGESTION: u32 = 52001;
+/// NIP-PG: Page suggestion resolution — accepts or rejects a suggestion.
+pub const KIND_PAGE_SUGGESTION_RESOLUTION: u32 = 52002;
+
 /// NIP-34: Repository announcement (parameterized replaceable, d-tag = repo-id).
 pub const KIND_GIT_REPO_ANNOUNCEMENT: u32 = 30617;
 /// NIP-34: Repository state — current branch/tag refs (parameterized replaceable, d-tag = repo-id).
@@ -754,6 +763,9 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_HUDDLE_ENDED,
     KIND_HUDDLE_LIVENESS,
     KIND_HUDDLE_GUIDELINES,
+    KIND_PAGE_REVISION,
+    KIND_PAGE_SUGGESTION,
+    KIND_PAGE_SUGGESTION_RESOLUTION,
     KIND_MEDIA_UPLOAD,
     KIND_GIT_REPO_ANNOUNCEMENT,
     KIND_GIT_REPO_STATE,
@@ -882,6 +894,23 @@ const _: () = assert!(
 const _: () = assert!(KIND_AUTH <= u16::MAX as u32);
 const _: () = assert!(KIND_CANVAS <= u16::MAX as u32);
 const _: () = assert!(KIND_HUDDLE_GUIDELINES <= u16::MAX as u32);
+// Compile-time: page kinds fit u16 and are regular stored kinds (append-only log).
+const _: () = assert!(KIND_PAGE_SUGGESTION_RESOLUTION <= u16::MAX as u32);
+const _: () = assert!(
+    !is_ephemeral(KIND_PAGE_REVISION)
+        && !is_replaceable(KIND_PAGE_REVISION)
+        && !is_parameterized_replaceable(KIND_PAGE_REVISION)
+);
+const _: () = assert!(
+    !is_ephemeral(KIND_PAGE_SUGGESTION)
+        && !is_replaceable(KIND_PAGE_SUGGESTION)
+        && !is_parameterized_replaceable(KIND_PAGE_SUGGESTION)
+);
+const _: () = assert!(
+    !is_ephemeral(KIND_PAGE_SUGGESTION_RESOLUTION)
+        && !is_replaceable(KIND_PAGE_SUGGESTION_RESOLUTION)
+        && !is_parameterized_replaceable(KIND_PAGE_SUGGESTION_RESOLUTION)
+);
 const _: () = assert!(EPHEMERAL_KIND_MIN < EPHEMERAL_KIND_MAX);
 // Compile-time: KIND_AGENT_TURN_METRIC is a regular stored kind (not ephemeral, not replaceable).
 const _: () = assert!(!is_ephemeral(KIND_AGENT_TURN_METRIC));
