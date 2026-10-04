@@ -254,6 +254,10 @@ test("client guards keep an invalid draft from being sent, and say why", async (
   await expect(page.getByTestId("page-editor-count")).toHaveClass(
     /text-destructive/,
   );
+  // An unbounded paste is not rendered or diffed.
+  await expect(
+    page.getByTestId("page-editor-too-large-to-preview"),
+  ).toBeVisible();
   await contentField(page).fill("a".repeat(64 * 1024));
   await expect(saveButton(page)).toBeEnabled();
 

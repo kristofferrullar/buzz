@@ -138,7 +138,9 @@ export function PageEditor({
       editor.requestClose();
       return;
     }
-    if (isSaveChord(event)) {
+    // Saving mid-composition would publish the text without the characters the
+    // IME has not committed yet, so the chord waits for the composition to end.
+    if (isSaveChord(event) && !event.nativeEvent.isComposing) {
       event.preventDefault();
       void editor.submit("save");
     }
@@ -280,7 +282,8 @@ export function PageEditor({
               </Button>
             </fieldset>
           )}
-          <div
+          <section
+            aria-label={pane === "changes" && !creating ? "Changes" : "Preview"}
             className="min-h-72 overflow-auto rounded-lg border border-border/70 bg-muted/20 px-4 py-3"
             data-testid={
               pane === "changes" && !creating
@@ -288,7 +291,17 @@ export function PageEditor({
                 : "page-editor-preview"
             }
           >
-            {pane === "changes" && head ? (
+            {overLimit ? (
+              // Rendering or diffing an unbounded paste would freeze the window;
+              // the size message under the field already says what to do.
+              <p
+                className="text-sm text-muted-foreground"
+                data-testid="page-editor-too-large-to-preview"
+              >
+                Too large to preview. Shorten the page to{" "}
+                {formatByteSize(PAGE_CONTENT_MAX_BYTES)} or less.
+              </p>
+            ) : pane === "changes" && head ? (
               <PageDiffView
                 DiffViewer={DiffViewer}
                 label="Your changes compared with the current version"
@@ -307,7 +320,7 @@ export function PageEditor({
                 hardLineBreaks={false}
               />
             )}
-          </div>
+          </section>
         </div>
       </div>
 
