@@ -104,6 +104,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goPages = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/pages",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goProfile = React.useCallback(
     (pubkey: string, behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -467,6 +478,7 @@ export function useAppNavigation() {
     goNewMessage,
     goNewWorkflow,
     goNewWorkflowForChannel,
+    goPages,
     goProject,
     goProjects,
     goPulse,

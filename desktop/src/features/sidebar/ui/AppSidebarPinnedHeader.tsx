@@ -1,4 +1,4 @@
-import { Activity, Bot, Folders, Inbox, Zap } from "lucide-react";
+import { Activity, Bot, FileText, Folders, Inbox, Zap } from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { SidebarProjectsSection } from "@/features/sidebar/ui/SidebarProjectsSection";
@@ -21,6 +21,7 @@ type SidebarSelectedView =
   | "agents"
   | "workflows"
   | "pulse"
+  | "pages"
   | "projects";
 
 type AppSidebarPinnedHeaderProps = {
@@ -43,6 +44,7 @@ type AppSidebarPrimaryMenuProps = {
   homeBadgeCount: number;
   onSelectAgents: () => void;
   onSelectHome: () => void;
+  onSelectPages: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
@@ -93,6 +95,7 @@ export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
   onSelectHome,
+  onSelectPages,
   onSelectProjects,
   onSelectPulse,
   onSelectWorkflows,
@@ -138,6 +141,20 @@ export function AppSidebarPrimaryMenu({
               >
                 <Activity className="h-4 w-4" />
                 <SidebarMenuLabel>Pulse</SidebarMenuLabel>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </FeatureGate>
+          <FeatureGate feature="pages">
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                data-testid="open-pages-view"
+                isActive={selectedView === "pages"}
+                onClick={onSelectPages}
+                tooltip="Space"
+                type="button"
+              >
+                <FileText className="h-4 w-4" />
+                <SidebarMenuLabel>Space</SidebarMenuLabel>
               </SidebarMenuButton>
             </SidebarMenuItem>
           </FeatureGate>

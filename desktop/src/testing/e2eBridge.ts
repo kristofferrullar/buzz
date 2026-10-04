@@ -31,6 +31,7 @@ import {
 } from "@/features/agents/observerRelayStore";
 import { switchManagedAgentModel } from "@/shared/api/agentControl";
 import { mockSearchHitMatches } from "./e2eBridgeSearch.ts";
+import { createMockPageStore, MOCK_PAGE_KINDS } from "./e2eBridgePages.ts";
 export { mockSearchHitMatches };
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type {
@@ -1335,6 +1336,8 @@ declare global {
      */
     __BUZZ_E2E_REPLACE_MOCK_TEAM_CATALOG_HEAD__?: (event: RelayEvent) => void;
     __BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?: (item: RawFeedItem) => RawFeedItem;
+    /** Store a NIP-PG page event and deliver it to live page subscriptions. */
+    __BUZZ_E2E_PUSH_MOCK_PAGE_EVENT__?: (event: RelayEvent) => void;
     /** Replace an existing feed item by id (or push if not found) and fire the updated event. */
     __BUZZ_E2E_REPLACE_MOCK_FEED_ITEM__?: (
       oldId: string,
@@ -3308,6 +3311,12 @@ const mockUserStatuses: RelayEvent[] = [];
 const mockReminderEvents: RelayEvent[] = [];
 const mockPersonaEvents: RelayEvent[] = [];
 const mockTeamCatalogEvents: RelayEvent[] = [];
+const mockPageStore = createMockPageStore({
+  alice: ALICE_PUBKEY,
+  agent: PROFILE_ONLY_AGENT_PUBKEY,
+  bob: BOB_PUBKEY,
+  viewer: MOCK_IDENTITY_PUBKEY,
+});
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
 const mockAuthResponses: Array<{ success: boolean; message: string }> = [];
@@ -10975,6 +10984,15 @@ function sendToMockSocket(args: {
       return;
     }
 
+    // NIP-PG page queries (kinds 52000-52002), served from the page store.
+    if (filter.kinds?.some((kind) => MOCK_PAGE_KINDS.has(kind))) {
+      for (const pageEvent of mockPageStore.query(filter)) {
+        sendWsText(socket.handler, ["EVENT", subId, pageEvent]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
     // Project queries: NIP-34 kinds, or kind:1 comments scoped by repo `a`
     // tag or by issue/PR root `e` tag (discussions, approvals, review
     // requests, assignment operations). Channel messages are kind 9, so a
@@ -11614,6 +11632,14 @@ export function maybeInstallE2eTauriMocks() {
       mockTeamCatalogEvents.splice(existingIndex, 1);
     }
     mockTeamCatalogEvents.push(event);
+  };
+  window.__BUZZ_E2E_PUSH_MOCK_PAGE_EVENT__ = (pageEvent) => {
+    mockPageStore.push(pageEvent);
+    emitMockLiveEvent(
+      pageEvent.tags.find((tag) => tag[0] === "h")?.[1] ??
+        GLOBAL_MOCK_SUBSCRIPTION,
+      pageEvent,
+    );
   };
   window.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ = (item) => {
     const category = item.category === "mention" ? "mentions" : item.category;
