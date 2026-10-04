@@ -516,6 +516,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
             }
         }
         KIND_NIP29_CREATE_GROUP | KIND_CANVAS => Ok(Scope::ChannelsWrite),
+        // NIP-PG pages are shared channel documents, like canvas: same write scope.
+        k if buzz_core::page::is_page_kind(k) => Ok(Scope::ChannelsWrite),
         KIND_NIP29_JOIN_REQUEST | KIND_NIP29_LEAVE_REQUEST | KIND_NIP43_LEAVE_REQUEST => {
             Ok(Scope::ChannelsRead)
         }
@@ -732,6 +734,10 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_HUDDLE_PARTICIPANT_LEFT
             | KIND_HUDDLE_ENDED
             | KIND_HUDDLE_GUIDELINES
+            // NIP-PG pages: every page event is scoped by its `h` tag.
+            | buzz_core::kind::KIND_PAGE_REVISION
+            | buzz_core::kind::KIND_PAGE_SUGGESTION
+            | buzz_core::kind::KIND_PAGE_SUGGESTION_RESOLUTION
     )
 }
 
@@ -2801,6 +2807,11 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    // NIP-PG: tag and size rules, before any page-specific database work.
+    if buzz_core::page::is_page_kind(kind_u32) {
+        super::pages::validate_shape(&event)?;
+    }
+
     // Track pre-created channel UUID for compensation on insert failure.
     let mut pre_created_channel: Option<Uuid> = None;
 
@@ -3144,7 +3155,14 @@ async fn ingest_event_inner(
         });
     }
 
-    let (stored_event, was_inserted) = if buzz_core::kind::is_replaceable(kind_u32) {
+    let (stored_event, was_inserted) = if buzz_core::page::is_page_kind(kind_u32) {
+        // NIP-PG: validate against the stored page and store the event (and, for
+        // a revision, advance the page head) in one transaction.
+        let page_channel = channel_id.ok_or_else(|| {
+            IngestError::Rejected("invalid: channel-scoped events must include an h tag".into())
+        })?;
+        super::pages::store_page_event(tenant, state, &event, page_channel).await?
+    } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
         state
@@ -3683,6 +3701,73 @@ mod postgres_tests {
             assert!(
                 requires_h_channel_scope(kind),
                 "kind {kind} should require h"
+            );
+        }
+    }
+
+    /// NIP-PG registration (docs/pages-fork-upgrade.md hotspot): every page kind
+    /// in the kind registry must be in BOTH ingest lists. Iterating `ALL_KINDS`
+    /// (not a hand-written list) means a page kind added to `kind.rs` without its
+    /// ingest registration fails here.
+    #[test]
+    fn every_page_kind_is_registered_in_both_ingest_lists() {
+        let page_kinds: Vec<u32> = buzz_core::kind::ALL_KINDS
+            .iter()
+            .copied()
+            .filter(|kind| buzz_core::page::is_page_kind(*kind))
+            .collect();
+        assert_eq!(page_kinds.len(), 3, "expected kinds 52000, 52001, 52002");
+        let dummy = make_dummy_event();
+        for kind in page_kinds {
+            assert_eq!(
+                required_scope_for_kind(kind, &dummy),
+                Ok(Scope::ChannelsWrite),
+                "page kind {kind} must require channels:write (same as canvas)"
+            );
+            assert!(
+                requires_h_channel_scope(kind),
+                "page kind {kind} must require an h tag"
+            );
+            assert!(
+                !is_global_only_kind(kind),
+                "page kind {kind} must never lose its channel scope"
+            );
+        }
+    }
+
+    /// A page event without an `h` tag has no channel, and the channel gate in
+    /// `ingest_event_inner` (`requires_h_channel_scope && channel_id.is_none()`)
+    /// rejects it. Forgetting the `requires_h_channel_scope` entry fails the
+    /// registration test above and the relay-backed `e2e_pages` test that
+    /// asserts the gate's exact message.
+    #[test]
+    fn page_events_without_an_h_tag_have_no_channel() {
+        let page = Uuid::new_v4().to_string();
+        let hex = "a".repeat(64);
+        for (kind, tags) in [
+            (
+                buzz_core::kind::KIND_PAGE_REVISION,
+                vec![vec!["d", page.as_str()], vec!["title", "Plan"]],
+            ),
+            (
+                buzz_core::kind::KIND_PAGE_SUGGESTION,
+                vec![vec!["d", page.as_str()], vec!["base", hex.as_str()]],
+            ),
+            (
+                buzz_core::kind::KIND_PAGE_SUGGESTION_RESOLUTION,
+                vec![
+                    vec!["d", page.as_str()],
+                    vec!["e", hex.as_str()],
+                    vec!["status", "rejected"],
+                ],
+            ),
+        ] {
+            let tags: Vec<&[&str]> = tags.iter().map(Vec::as_slice).collect();
+            let event = make_event_with_tags(kind, "", &tags);
+            assert_eq!(extract_channel_id(&event), None);
+            assert!(
+                requires_h_channel_scope(kind) && extract_channel_id(&event).is_none(),
+                "page kind {kind} without h must hit the channel gate"
             );
         }
     }
