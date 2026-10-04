@@ -604,7 +604,8 @@ pub const KIND_HUDDLE_GUIDELINES: u32 = 48106;
 pub const KIND_MEDIA_UPLOAD: u32 = 49001;
 
 // Pages (52000–52099) — fork-private block, see docs/nips/NIP-PG.md and
-// docs/pages-fork-upgrade.md. Keep all page kinds here so a renumber is one edit.
+// docs/pages-fork-upgrade.md. Keep all page kinds here; the desktop and mobile
+// mirrors must match (the `page` module's parity test enforces it).
 /// NIP-PG: Page revision — append-only, `h`-scoped; the newest in the `prev` chain is the head.
 pub const KIND_PAGE_REVISION: u32 = 52000;
 /// NIP-PG: Page suggestion — a proposed full-content edit against a base revision.
@@ -894,24 +895,6 @@ const _: () = assert!(
 const _: () = assert!(KIND_AUTH <= u16::MAX as u32);
 const _: () = assert!(KIND_CANVAS <= u16::MAX as u32);
 const _: () = assert!(KIND_HUDDLE_GUIDELINES <= u16::MAX as u32);
-// Compile-time: page kinds fit u16 and are regular stored kinds (append-only log).
-const _: () = assert!(KIND_PAGE_SUGGESTION_RESOLUTION <= u16::MAX as u32);
-const _: () = assert!(
-    !is_ephemeral(KIND_PAGE_REVISION)
-        && !is_replaceable(KIND_PAGE_REVISION)
-        && !is_parameterized_replaceable(KIND_PAGE_REVISION)
-);
-const _: () = assert!(
-    !is_ephemeral(KIND_PAGE_SUGGESTION)
-        && !is_replaceable(KIND_PAGE_SUGGESTION)
-        && !is_parameterized_replaceable(KIND_PAGE_SUGGESTION)
-);
-const _: () = assert!(
-    !is_ephemeral(KIND_PAGE_SUGGESTION_RESOLUTION)
-        && !is_replaceable(KIND_PAGE_SUGGESTION_RESOLUTION)
-        && !is_parameterized_replaceable(KIND_PAGE_SUGGESTION_RESOLUTION)
-);
-const _: () = assert!(EPHEMERAL_KIND_MIN < EPHEMERAL_KIND_MAX);
 // Compile-time: KIND_AGENT_TURN_METRIC is a regular stored kind (not ephemeral, not replaceable).
 const _: () = assert!(!is_ephemeral(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(!is_replaceable(KIND_AGENT_TURN_METRIC));

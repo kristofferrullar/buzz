@@ -27,12 +27,12 @@ use crate::{
 };
 
 /// Parse a tag slice, mapping errors to `SdkError::InvalidTag`.
-fn tag(parts: &[&str]) -> Result<Tag, SdkError> {
+pub(crate) fn tag(parts: &[&str]) -> Result<Tag, SdkError> {
     Tag::parse(parts.iter().copied()).map_err(|e| SdkError::InvalidTag(e.to_string()))
 }
 
 /// Validate content byte length.
-fn check_content(content: &str, max: usize) -> Result<(), SdkError> {
+pub(crate) fn check_content(content: &str, max: usize) -> Result<(), SdkError> {
     let got = content.len();
     if got > max {
         return Err(SdkError::ContentTooLarge { max, got });

@@ -3,7 +3,10 @@
 //! Kinds live in [`crate::kind`]; this module holds the tag names and limits so
 //! both sides validate against one definition. See `docs/nips/NIP-PG.md`.
 
-use crate::kind::{KIND_PAGE_REVISION, KIND_PAGE_SUGGESTION, KIND_PAGE_SUGGESTION_RESOLUTION};
+use crate::kind::{
+    is_ephemeral, is_parameterized_replaceable, is_replaceable, KIND_PAGE_REVISION,
+    KIND_PAGE_SUGGESTION, KIND_PAGE_SUGGESTION_RESOLUTION,
+};
 
 /// Tag naming the page a revision or suggestion belongs to (uuid v4).
 pub const TAG_PAGE_ID: &str = "d";
@@ -27,8 +30,27 @@ pub const STATUS_REJECTED: &str = "rejected";
 
 /// Maximum page title length in bytes.
 pub const MAX_PAGE_TITLE_BYTES: usize = 256;
-/// Maximum page content length in bytes (matches the relay's `max_content_len`).
+/// Maximum page content length in bytes.
+///
+/// Tighter than the relay's generic 256 KiB event-content cap; the relay applies
+/// it to page kinds with a page-specific check (NIP-PG rule 5).
 pub const MAX_PAGE_CONTENT_BYTES: usize = 64 * 1024;
+
+/// `true` if `kind` fits nostr's u16-backed `Kind` and is a regular stored kind
+/// (not ephemeral, replaceable, or parameterized replaceable).
+const fn is_regular_u16(kind: u32) -> bool {
+    kind <= u16::MAX as u32
+        && !is_ephemeral(kind)
+        && !is_replaceable(kind)
+        && !is_parameterized_replaceable(kind)
+}
+
+// Compile-time: every page kind is an append-only regular kind that fits u16.
+const _: () = assert!(
+    is_regular_u16(KIND_PAGE_REVISION)
+        && is_regular_u16(KIND_PAGE_SUGGESTION)
+        && is_regular_u16(KIND_PAGE_SUGGESTION_RESOLUTION)
+);
 
 /// Returns `true` if `kind` is one of the NIP-PG page kinds.
 pub const fn is_page_kind(kind: u32) -> bool {
@@ -65,6 +87,34 @@ mod tests {
             KIND_PAGE_SUGGESTION_RESOLUTION,
         ] {
             assert!((52000..=52099).contains(&k), "kind {k} outside 52000–52099");
+        }
+    }
+
+    #[test]
+    fn client_mirrors_match_kind_registry() {
+        let ts = include_str!("../../../desktop/src/shared/constants/kinds.ts");
+        let dart = include_str!("../../../mobile/lib/shared/relay/nostr_models.dart");
+        for (ts_name, dart_name, kind) in [
+            ("KIND_PAGE_REVISION", "pageRevision", KIND_PAGE_REVISION),
+            (
+                "KIND_PAGE_SUGGESTION",
+                "pageSuggestion",
+                KIND_PAGE_SUGGESTION,
+            ),
+            (
+                "KIND_PAGE_SUGGESTION_RESOLUTION",
+                "pageSuggestionResolution",
+                KIND_PAGE_SUGGESTION_RESOLUTION,
+            ),
+        ] {
+            assert!(
+                ts.contains(&format!("export const {ts_name} = {kind};")),
+                "desktop kinds.ts out of sync for {ts_name}"
+            );
+            assert!(
+                dart.contains(&format!("static const {dart_name} = {kind};")),
+                "mobile nostr_models.dart out of sync for {dart_name}"
+            );
         }
     }
 }

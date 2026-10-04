@@ -7,24 +7,16 @@ use buzz_core::{
         TAG_PAGE_ID, TAG_PREV, TAG_REV, TAG_STATUS, TAG_SUGGESTION, TAG_TITLE,
     },
 };
-use nostr::{EventBuilder, EventId, Kind, Tag};
+use nostr::{EventBuilder, EventId, Kind};
 use uuid::Uuid;
 
-use crate::SdkError;
+use crate::{
+    builders::{check_content, tag},
+    SdkError,
+};
 
-fn tag(parts: &[&str]) -> Result<Tag, SdkError> {
-    Tag::parse(parts.iter().copied()).map_err(|e| SdkError::InvalidTag(e.to_string()))
-}
-
-fn check_content(content: &str) -> Result<(), SdkError> {
-    let got = content.len();
-    if got > MAX_PAGE_CONTENT_BYTES {
-        return Err(SdkError::ContentTooLarge {
-            max: MAX_PAGE_CONTENT_BYTES,
-            got,
-        });
-    }
-    Ok(())
+fn check_page_content(content: &str) -> Result<(), SdkError> {
+    check_content(content, MAX_PAGE_CONTENT_BYTES)
 }
 
 fn check_title(title: &str) -> Result<(), SdkError> {
@@ -42,31 +34,48 @@ fn check_title(title: &str) -> Result<(), SdkError> {
     Ok(())
 }
 
+/// How a page revision relates to the page's history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageEdit {
+    /// First revision of a new page (no `prev`).
+    Create,
+    /// Edit based on the current head `prev`. The relay rejects a stale `prev`
+    /// with `conflict:`.
+    Edit {
+        /// The head revision this edit is based on.
+        prev: EventId,
+    },
+    /// Applies a suggestion; `prev` must equal the suggestion's `base`.
+    ApplySuggestion {
+        /// The head revision this edit is based on.
+        prev: EventId,
+        /// The suggestion being applied.
+        suggestion: EventId,
+    },
+}
+
 /// Build a page revision (kind 52000).
-///
-/// `prev` is the head revision this edit is based on; pass `None` only for the
-/// first revision of a page. The relay rejects a stale `prev` with `conflict:`.
-/// `suggestion` marks a revision that applies an accepted suggestion.
 pub fn build_page_revision(
     channel_id: Uuid,
     page_id: Uuid,
     title: &str,
     content: &str,
-    prev: Option<EventId>,
-    suggestion: Option<EventId>,
+    edit: PageEdit,
 ) -> Result<EventBuilder, SdkError> {
     check_title(title)?;
-    check_content(content)?;
+    check_page_content(content)?;
     let mut tags = vec![
         tag(&["h", &channel_id.to_string()])?,
         tag(&[TAG_PAGE_ID, &page_id.to_string()])?,
         tag(&[TAG_TITLE, title])?,
     ];
-    if let Some(prev) = prev {
-        tags.push(tag(&[TAG_PREV, &prev.to_hex()])?);
-    }
-    if let Some(suggestion) = suggestion {
-        tags.push(tag(&[TAG_SUGGESTION, &suggestion.to_hex()])?);
+    match edit {
+        PageEdit::Create => {}
+        PageEdit::Edit { prev } => tags.push(tag(&[TAG_PREV, &prev.to_hex()])?),
+        PageEdit::ApplySuggestion { prev, suggestion } => {
+            tags.push(tag(&[TAG_PREV, &prev.to_hex()])?);
+            tags.push(tag(&[TAG_SUGGESTION, &suggestion.to_hex()])?);
+        }
     }
     Ok(EventBuilder::new(Kind::Custom(KIND_PAGE_REVISION as u16), content).tags(tags))
 }
@@ -78,7 +87,7 @@ pub fn build_page_suggestion(
     base: EventId,
     content: &str,
 ) -> Result<EventBuilder, SdkError> {
-    check_content(content)?;
+    check_page_content(content)?;
     let tags = vec![
         tag(&["h", &channel_id.to_string()])?,
         tag(&[TAG_PAGE_ID, &page_id.to_string()])?,
@@ -144,25 +153,44 @@ mod tests {
     #[test]
     fn first_revision_has_no_prev_tag() {
         let (cid, pid) = (Uuid::new_v4(), Uuid::new_v4());
-        let ev = sign(build_page_revision(cid, pid, "Plan", "# Plan", None, None).unwrap());
+        let ev = sign(build_page_revision(cid, pid, "Plan", "# Plan", PageEdit::Create).unwrap());
         assert_eq!(ev.kind.as_u16(), 52000);
         assert_eq!(tag_value(&ev, "h"), Some(cid.to_string()));
         assert_eq!(tag_value(&ev, "d"), Some(pid.to_string()));
         assert_eq!(tag_value(&ev, "title"), Some("Plan".into()));
         assert_eq!(tag_value(&ev, "prev"), None);
+        assert_eq!(tag_value(&ev, "suggestion"), None);
         assert_eq!(ev.content, "# Plan");
     }
 
     #[test]
-    fn later_revision_carries_prev_and_suggestion() {
+    fn edit_carries_prev_only() {
         let ev = sign(
             build_page_revision(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
                 "Plan",
                 "v2",
-                Some(eid(1)),
-                Some(eid(2)),
+                PageEdit::Edit { prev: eid(1) },
+            )
+            .unwrap(),
+        );
+        assert_eq!(tag_value(&ev, "prev"), Some(eid(1).to_hex()));
+        assert_eq!(tag_value(&ev, "suggestion"), None);
+    }
+
+    #[test]
+    fn applying_a_suggestion_carries_prev_and_suggestion() {
+        let ev = sign(
+            build_page_revision(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "Plan",
+                "v2",
+                PageEdit::ApplySuggestion {
+                    prev: eid(1),
+                    suggestion: eid(2),
+                },
             )
             .unwrap(),
         );
@@ -171,13 +199,15 @@ mod tests {
     }
 
     #[test]
-    fn revision_rejects_blank_and_oversize_titles() {
+    fn revision_title_is_bounded_in_bytes_not_chars() {
         let (cid, pid) = (Uuid::new_v4(), Uuid::new_v4());
-        assert!(build_page_revision(cid, pid, "   ", "x", None, None).is_err());
-        let long = "t".repeat(MAX_PAGE_TITLE_BYTES + 1);
-        assert!(build_page_revision(cid, pid, &long, "x", None, None).is_err());
-        let max = "t".repeat(MAX_PAGE_TITLE_BYTES);
-        assert!(build_page_revision(cid, pid, &max, "x", None, None).is_ok());
+        let rev = |t: &str| build_page_revision(cid, pid, t, "x", PageEdit::Create);
+        assert!(rev("   ").is_err());
+        assert!(rev(&"t".repeat(MAX_PAGE_TITLE_BYTES)).is_ok());
+        assert!(rev(&"t".repeat(MAX_PAGE_TITLE_BYTES + 1)).is_err());
+        // 128 two-byte chars = 256 bytes (ok); 129 = 258 bytes (rejected).
+        assert!(rev(&"é".repeat(128)).is_ok());
+        assert!(rev(&"é".repeat(129)).is_err());
     }
 
     #[test]
@@ -185,7 +215,7 @@ mod tests {
         let (cid, pid) = (Uuid::new_v4(), Uuid::new_v4());
         let big = "a".repeat(MAX_PAGE_CONTENT_BYTES + 1);
         assert!(matches!(
-            build_page_revision(cid, pid, "T", &big, None, None),
+            build_page_revision(cid, pid, "T", &big, PageEdit::Create),
             Err(SdkError::ContentTooLarge { .. })
         ));
         assert!(matches!(
@@ -193,47 +223,51 @@ mod tests {
             Err(SdkError::ContentTooLarge { .. })
         ));
         let max = "a".repeat(MAX_PAGE_CONTENT_BYTES);
-        assert!(build_page_revision(cid, pid, "T", &max, None, None).is_ok());
+        assert!(build_page_revision(cid, pid, "T", &max, PageEdit::Create).is_ok());
+        assert!(build_page_suggestion(cid, pid, eid(1), &max).is_ok());
     }
 
     #[test]
-    fn suggestion_carries_base_and_never_prev() {
+    fn suggestion_is_scoped_to_channel_and_page_and_names_its_base() {
         let (cid, pid) = (Uuid::new_v4(), Uuid::new_v4());
         let ev = sign(build_page_suggestion(cid, pid, eid(7), "proposed").unwrap());
         assert_eq!(ev.kind.as_u16(), 52001);
+        assert_eq!(tag_value(&ev, "h"), Some(cid.to_string()));
+        assert_eq!(tag_value(&ev, "d"), Some(pid.to_string()));
         assert_eq!(tag_value(&ev, "base"), Some(eid(7).to_hex()));
         assert_eq!(tag_value(&ev, "prev"), None);
-        assert_eq!(tag_value(&ev, "h"), Some(cid.to_string()));
+        assert_eq!(ev.content, "proposed");
     }
 
     #[test]
-    fn accepted_resolution_references_revision() {
+    fn accepted_resolution_is_scoped_and_references_revision() {
+        let (cid, pid) = (Uuid::new_v4(), Uuid::new_v4());
         let ev = sign(
             build_page_suggestion_resolution(
-                Uuid::new_v4(),
-                Uuid::new_v4(),
+                cid,
+                pid,
                 eid(3),
                 PageResolution::Accepted { revision: eid(4) },
             )
             .unwrap(),
         );
         assert_eq!(ev.kind.as_u16(), 52002);
+        assert_eq!(tag_value(&ev, "h"), Some(cid.to_string()));
+        assert_eq!(tag_value(&ev, "d"), Some(pid.to_string()));
         assert_eq!(tag_value(&ev, "e"), Some(eid(3).to_hex()));
         assert_eq!(tag_value(&ev, "status"), Some("accepted".into()));
         assert_eq!(tag_value(&ev, "rev"), Some(eid(4).to_hex()));
     }
 
     #[test]
-    fn rejected_resolution_has_no_rev_tag() {
+    fn rejected_resolution_is_scoped_and_has_no_rev_tag() {
+        let (cid, pid) = (Uuid::new_v4(), Uuid::new_v4());
         let ev = sign(
-            build_page_suggestion_resolution(
-                Uuid::new_v4(),
-                Uuid::new_v4(),
-                eid(3),
-                PageResolution::Rejected,
-            )
-            .unwrap(),
+            build_page_suggestion_resolution(cid, pid, eid(3), PageResolution::Rejected).unwrap(),
         );
+        assert_eq!(tag_value(&ev, "h"), Some(cid.to_string()));
+        assert_eq!(tag_value(&ev, "d"), Some(pid.to_string()));
+        assert_eq!(tag_value(&ev, "e"), Some(eid(3).to_hex()));
         assert_eq!(tag_value(&ev, "status"), Some("rejected".into()));
         assert_eq!(tag_value(&ev, "rev"), None);
     }

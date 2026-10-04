@@ -20,7 +20,9 @@ library surface that lists every page you can see across channels.
 - Every edit is a signed, append-only revision. History, attribution, and
   conflict detection come from the event log, not a side system.
 - Agents are colleagues, not editors-in-chief: an agent **suggests** an edit, a
-  human **accepts or rejects** it. Agents author with their own npub.
+  human **accepts or rejects** it. Agents author with their own npub. In P1 this
+  is a client convention (CLI, ACP prompt, desktop UI); the relay cannot yet
+  tell agents from humans, so it is not protocol-enforced (see NIP-PG).
 - The library is assembled at read time, like the Home feed, and only shows
   pages in channels the viewer can already read.
 
@@ -66,6 +68,8 @@ home page; that is a separate, reversible migration.
 - Revision retention: reject no-op revisions and cap retained history (limit to
   be set with the relay change).
 - Whether write access mirrors canvas scope or message scope.
+- Protocol-level enforcement of "agents suggest, humans accept".
+- Search: head revisions only (index exclusion vs page-aware filtering).
 - Public publishing of selected pages as NIP-23 notes (public channels only).
 - Real-time co-editing (a CRDT such as Yjs, using Tiptap's collaboration
   extension rather than custom code).
