@@ -126,10 +126,12 @@ test("permission, archived, timeout and rate limit are told apart", () => {
   );
   assert.equal(limited.kind, "rate-limited");
 
-  const offline = classifyPageWriteError(
-    new Error("relay unreachable: connection refused"),
-  );
-  assert.equal(offline.kind, "offline");
+  for (const text of [
+    "relay unreachable: connection refused",
+    "relay rejected event: relay unreachable: connection refused",
+  ]) {
+    assert.equal(classifyPageWriteError(new Error(text)).kind, "offline", text);
+  }
 });
 
 test("every kind has a distinct user-facing message", () => {

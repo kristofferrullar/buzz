@@ -127,7 +127,7 @@ export function classifyPageWriteError(error: unknown): PageWriteError {
       : { kind, message, detail, conflictReason };
 
   // Connectivity first: it is also a prefix the Tauri layer owns.
-  if (detail.startsWith("relay unreachable:")) {
+  if (detail.includes("relay unreachable:")) {
     return make(
       "offline",
       `Can't reach the relay. ${KEEP_DRAFT} Try again when you're back online.`,
