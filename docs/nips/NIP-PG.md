@@ -97,6 +97,13 @@ reply).
    HTTP `/query` and `/count` bridges. The guarantee covers filters whose `kinds`
    are all page kinds (kinds 52000-52002, optionally with NIP-33 kinds); a
    kindless `#d` filter is answered like any other generic tag, after the limit.
+9. **Library reads.** A filter for `PAGE_REVISION` with no `#h` is scoped to the
+   channels the reader can access, like any other channel-scoped kind, and is
+   served newest first (`created_at DESC, id ASC`) with the usual `until`
+   cursor. Clients build a page library from that window: a page's newest
+   revision is newer than all its others, so any page with a revision in the
+   window has its head in the window. A client that stops paging at a bound
+   MUST tell the reader the list may omit older pages.
 
 ## Write scope
 
@@ -155,9 +162,14 @@ Results are newest first (`created_at` descending, ties by id).
 | Revisions, suggestions and resolutions of one page | `{"kinds":[52000,52001,52002], "#h":["<channel>"], "#d":["<page>"]}` |
 | Suggestions of a page and how they were resolved | `{"kinds":[52001,52002], "#h":["<channel>"], "#d":["<page>"]}`; a suggestion is also closed by a revision's `suggestion` tag, so read the history too |
 | Library of a channel | `{"kinds":[52000], "#h":["<channel>"]}`; a page's head is its newest revision |
-| Library across channels | `{"kinds":[52000]}`; scoped to the reader's channels |
+| Library across channels | `{"kinds":[52000]}`; scoped to the reader's channels (rule 9), paged with `until` set to the oldest `created_at` received (a boundary event can repeat; dedupe by id) |
 | Number of revisions | the history filter in `COUNT` |
 | Live updates | the same filters in a REQ subscription; new events fan out like any channel event |
+
+A REQ registers its live subscription before it reads history, and the relay
+fans an event out just after it answers the writer, so an event stored a moment
+ago can arrive twice before EOSE (as history and as a live event). Clients
+dedupe by event id.
 
 A page's head is the revision no other revision names as `prev`; clients read it
 as the newest revision, or follow `prev` for a fork. There is no server-side
