@@ -39,6 +39,13 @@ export function PageView({
   );
   const detail = query.data?.detail ?? null;
 
+  // Opening a page moves focus to its first control, so keyboard and
+  // screen-reader users land in the new view instead of on a removed row.
+  const backRef = React.useRef<HTMLButtonElement>(null);
+  React.useEffect(() => {
+    backRef.current?.focus();
+  }, []);
+
   return (
     <div
       className="flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-7 sm:px-6 sm:py-8"
@@ -49,6 +56,7 @@ export function PageView({
           className="-ml-2"
           data-testid="page-back"
           onClick={onBack}
+          ref={backRef}
           size="sm"
           type="button"
           variant="ghost"
@@ -59,7 +67,7 @@ export function PageView({
 
         {query.isLoading ? (
           <BuzzLoadingState className="min-h-48" label="Loading page" />
-        ) : query.isError ? (
+        ) : query.isError && !query.data ? (
           <div
             className="flex flex-col items-center gap-3 py-16 text-center"
             data-testid="page-error"
@@ -81,11 +89,22 @@ export function PageView({
             </Button>
           </div>
         ) : detail ? (
-          <PageDetailBody
-            detail={detail}
-            historyTruncated={query.data?.truncated === true}
-            useAuthorLabels={useAuthorLabels}
-          />
+          <>
+            {query.isError ? (
+              <p
+                className="text-sm text-destructive"
+                data-testid="page-stale"
+                role="status"
+              >
+                Couldn&rsquo;t refresh. Showing the page as last loaded.
+              </p>
+            ) : null}
+            <PageDetailBody
+              detail={detail}
+              historyTruncated={query.data?.truncated === true}
+              useAuthorLabels={useAuthorLabels}
+            />
+          </>
         ) : (
           <div
             className="flex flex-col items-center gap-2 py-16 text-center"

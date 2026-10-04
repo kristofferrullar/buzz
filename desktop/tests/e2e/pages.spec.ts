@@ -277,6 +277,8 @@ test("the library and page view are fully keyboard navigable", async ({
   await page.keyboard.press("Enter");
   await expect(page.getByTestId("page-view")).toBeVisible();
   await expect(page.getByTestId("page-title")).toHaveText("Deploy runbook");
+  // Opening moves focus into the new view.
+  await expect(page.getByTestId("page-back")).toBeFocused();
 
   // History rows follow the same keyboard contract; Space selects one.
   const history = page.getByTestId("page-history-row");
@@ -292,6 +294,82 @@ test("the library and page view are fully keyboard navigable", async ({
   await page.getByTestId("page-back").focus();
   await page.keyboard.press("Enter");
   await expect(page.getByTestId("pages-library-list")).toBeVisible();
+  // ...and focus returns to the row that opened the page, not the document top.
+  await expect(rows.nth(1)).toBeFocused();
+  await expect(rows.nth(1)).toHaveAttribute("tabindex", "0");
+});
+
+test("a failed library read is an error, never an empty library", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_FAIL_PAGE_QUERIES__ = true;
+  });
+  await page.goto("/");
+  await page.getByTestId("open-pages-view").click();
+
+  await expect(page.getByTestId("pages-library-error")).toBeVisible();
+  await expect(page.getByTestId("pages-library-empty")).toHaveCount(0);
+  await expect(page.getByTestId("pages-library-row")).toHaveCount(0);
+
+  // Recovery: once the relay answers, Try again shows the real pages.
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_FAIL_PAGE_QUERIES__ = false;
+  });
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.getByTestId("pages-library-row")).toHaveCount(
+    LIBRARY_ORDER.length,
+  );
+  await expect(page.getByTestId("pages-library-error")).toHaveCount(0);
+});
+
+test("a failed refresh keeps the pages already shown and says so", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await openSpace(page);
+  await expect(page.getByTestId("pages-library-row")).toHaveCount(
+    LIBRARY_ORDER.length,
+  );
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_FAIL_PAGE_QUERIES__ = true;
+  });
+  await page.getByRole("button", { name: "Refresh pages" }).click();
+
+  await expect(page.getByTestId("pages-library-stale")).toBeVisible();
+  await expect(page.getByTestId("pages-library-row")).toHaveCount(
+    LIBRARY_ORDER.length,
+  );
+  await expect(page.getByTestId("pages-library-error")).toHaveCount(0);
+});
+
+test("a failed page read is an error with a way back, then recovers", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await openSpace(page);
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_FAIL_PAGE_QUERIES__ = true;
+  });
+
+  await page
+    .getByTestId("pages-library-row")
+    .filter({ hasText: "Q4 Plan" })
+    .click();
+  await expect(page.getByTestId("page-error")).toBeVisible();
+  await expect(page.getByTestId("page-not-found")).toHaveCount(0);
+  await expect(page.getByTestId("page-back")).toBeVisible();
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_FAIL_PAGE_QUERIES__ = false;
+  });
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.getByTestId("page-content")).toContainText(
+    "Relay capacity",
+  );
+  await expect(page.getByTestId("page-error")).toHaveCount(0);
 });
 
 test("revisions published while Space is open arrive live", async ({

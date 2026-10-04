@@ -1,3 +1,5 @@
+import * as React from "react";
+
 import { cn } from "@/shared/lib/cn";
 import { formatItemTimestamp } from "@/shared/lib/datetime";
 import { Badge } from "@/shared/ui/badge";
@@ -24,7 +26,11 @@ export function PageHistoryList({
   onSelect,
   selectedId,
 }: PageHistoryListProps) {
-  const { listProps, onRowFocus, tabStopIndex } = useRovingList(history.length);
+  const revisionIds = React.useMemo(
+    () => history.map(({ revision }) => revision.id),
+    [history],
+  );
+  const { listProps, onRowFocus, tabStopKey } = useRovingList(revisionIds);
 
   return (
     <ul
@@ -33,7 +39,7 @@ export function PageHistoryList({
       data-testid="page-history-list"
       {...listProps}
     >
-      {history.map(({ isHead, onHeadChain, revision }, index) => {
+      {history.map(({ isHead, onHeadChain, revision }) => {
         const selected = revision.id === selectedId;
         return (
           <li key={revision.id}>
@@ -49,8 +55,8 @@ export function PageHistoryList({
               data-revision-id={revision.id}
               data-testid="page-history-row"
               onClick={() => onSelect(revision.id)}
-              onFocus={() => onRowFocus(index)}
-              tabIndex={index === tabStopIndex ? 0 : -1}
+              onFocus={() => onRowFocus(revision.id)}
+              tabIndex={revision.id === tabStopKey ? 0 : -1}
               type="button"
             >
               <span className="block truncate text-sm font-medium">

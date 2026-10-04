@@ -14,16 +14,22 @@ const NAVIGATION_KEYS = new Set(["ArrowDown", "ArrowUp", "Home", "End"]);
  * behaviour, so keyboard and pointer activation share one `onClick`. Chorded
  * arrows (Shift, Alt, Ctrl, Meta) and IME composition are left alone.
  *
+ * The tab stop is tracked by row key, not position, so a live update that
+ * re-sorts or removes rows never leaves it on a different row than the one the
+ * user was on, and never on a row that no longer exists.
+ *
  * Spread `listProps` on the `ul`. Each row spreads {@link ROVING_ITEM_PROPS},
- * sets `tabIndex` to 0 only when `index === tabStopIndex` (else -1), and calls
- * `onRowFocus(index)` from its `onFocus`, so a pointer click or Tab also moves
+ * sets `tabIndex` to 0 only when its key is `tabStopKey` (else -1), and calls
+ * `onRowFocus(key)` from its `onFocus`, so a pointer click or Tab also moves
  * the tab stop. `onRowFocus` is referentially stable, so rows can be memoised.
  */
-export function useRovingList(itemCount: number) {
+export function useRovingList(itemKeys: readonly string[]) {
   const listRef = React.useRef<HTMLUListElement>(null);
-  const [activeIndex, onRowFocus] = React.useState(0);
-  // Rows come and go with live updates; never leave the tab stop past the end.
-  const tabStopIndex = Math.min(activeIndex, Math.max(itemCount - 1, 0));
+  const [activeKey, onRowFocus] = React.useState<string | null>(null);
+  const tabStopKey =
+    activeKey !== null && itemKeys.includes(activeKey)
+      ? activeKey
+      : (itemKeys[0] ?? null);
 
   const onKeyDown = React.useCallback((event: React.KeyboardEvent) => {
     if (event.defaultPrevented || event.nativeEvent.isComposing) return;
@@ -50,6 +56,6 @@ export function useRovingList(itemCount: number) {
   return {
     listProps: { onKeyDown, ref: listRef },
     onRowFocus,
-    tabStopIndex,
+    tabStopKey,
   };
 }

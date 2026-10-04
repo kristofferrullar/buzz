@@ -1,3 +1,5 @@
+import * as React from "react";
+
 import { usePagesLiveUpdates } from "../hooks";
 import { pageKey } from "../lib/pageModel";
 import type { PageSelection, PagesHostBindings } from "../types";
@@ -27,6 +29,18 @@ export function PagesScreen({
 }: PagesScreenProps) {
   usePagesLiveUpdates(communityId);
 
+  // Remember which page was opened so closing it can put focus back on its row.
+  const [restoreFocusKey, setRestoreFocusKey] = React.useState<string | null>(
+    null,
+  );
+  const handleOpenPage = React.useCallback(
+    (next: PageSelection) => {
+      setRestoreFocusKey(pageKey(next));
+      onOpenPage(next);
+    },
+    [onOpenPage],
+  );
+
   return (
     <div
       className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
@@ -43,7 +57,8 @@ export function PagesScreen({
       ) : (
         <SpaceLibrary
           communityId={communityId}
-          onOpenPage={onOpenPage}
+          onOpenPage={handleOpenPage}
+          restoreFocusKey={restoreFocusKey}
           useAuthorLabels={useAuthorLabels}
         />
       )}

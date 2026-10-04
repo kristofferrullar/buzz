@@ -1338,6 +1338,8 @@ declare global {
     __BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?: (item: RawFeedItem) => RawFeedItem;
     /** Store a NIP-PG page event and deliver it to live page subscriptions. */
     __BUZZ_E2E_PUSH_MOCK_PAGE_EVENT__?: (event: RelayEvent) => void;
+    /** While true, page REQs are answered with CLOSED (a failed relay read). */
+    __BUZZ_E2E_FAIL_PAGE_QUERIES__?: boolean;
     /** Replace an existing feed item by id (or push if not found) and fire the updated event. */
     __BUZZ_E2E_REPLACE_MOCK_FEED_ITEM__?: (
       oldId: string,
@@ -10986,6 +10988,14 @@ function sendToMockSocket(args: {
 
     // NIP-PG page queries (kinds 52000-52002), served from the page store.
     if (filter.kinds?.some((kind) => MOCK_PAGE_KINDS.has(kind))) {
+      if (window.__BUZZ_E2E_FAIL_PAGE_QUERIES__) {
+        sendWsText(socket.handler, [
+          "CLOSED",
+          subId,
+          "error: mock page query failure",
+        ]);
+        return;
+      }
       for (const pageEvent of mockPageStore.query(filter)) {
         sendWsText(socket.handler, ["EVENT", subId, pageEvent]);
       }

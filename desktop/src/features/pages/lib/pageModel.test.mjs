@@ -5,6 +5,7 @@ import {
   buildLibrary,
   buildPageDetail,
   closedSuggestions,
+  deriveSuggestionStates,
   headChainIds,
   pageKey,
   parsePageEvents,
@@ -323,6 +324,85 @@ test("a rejected suggestion is closed even though its base is the head", () => {
   assert.equal(detail.suggestions[0].closed, "resolution");
   assert.equal(detail.suggestions[0].stale, false);
 });
+
+// Full input space for a suggestion's state: how it was closed (nothing, a
+// resolution, an applying revision, both) against whether its base is the head.
+const CLOSURE_CASES = [
+  { name: "nothing", withResolution: false, withRevision: false, closed: null },
+  {
+    name: "a resolution",
+    withResolution: true,
+    withRevision: false,
+    closed: "resolution",
+  },
+  {
+    name: "an applying revision",
+    withResolution: false,
+    withRevision: true,
+    closed: "revision",
+  },
+  // A resolution is the explicit record, so it wins when both exist.
+  {
+    name: "both",
+    withResolution: true,
+    withRevision: true,
+    closed: "resolution",
+  },
+];
+
+for (const baseIsHead of [true, false]) {
+  for (const { name, withResolution, withRevision, closed } of CLOSURE_CASES) {
+    const baseLabel = baseIsHead ? "is" : "is not";
+    test(
+      "suggestion state: closed by " +
+        name +
+        ", base " +
+        baseLabel +
+        " the head",
+      () => {
+        const headId = hex("2");
+        const base = baseIsHead ? headId : hex("1");
+        const suggestionId = hex("6");
+        const parsed = parsePageEvents([
+          revision({ id: hex("1"), createdAt: 100 }),
+          revision({ id: headId, prev: hex("1"), createdAt: 200 }),
+          suggestion({ id: suggestionId, base, createdAt: 150 }),
+        ]);
+        const resolutions = withResolution
+          ? parsePageEvents([
+              resolution({
+                id: hex("8"),
+                target: suggestionId,
+                createdAt: 300,
+              }),
+            ]).resolutions
+          : [];
+        const revisions = withRevision
+          ? [
+              ...parsed.revisions,
+              ...parsePageEvents([
+                revision({
+                  id: hex("3"),
+                  prev: hex("9"),
+                  createdAt: 50,
+                  suggestion: suggestionId,
+                }),
+              ]).revisions,
+            ]
+          : parsed.revisions;
+
+        const [state] = deriveSuggestionStates({
+          headId,
+          resolutions,
+          revisions,
+          suggestions: parsed.suggestions,
+        });
+        assert.equal(state.closed, closed);
+        assert.equal(state.stale, !baseIsHead);
+      },
+    );
+  }
+}
 
 test("page detail ignores events that belong to a different page", () => {
   const otherPage = "66666666-6666-4666-8666-666666666666";

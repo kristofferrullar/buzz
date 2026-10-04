@@ -68,6 +68,13 @@ Common: `["h", "<channel uuid>"]`, `["d", "<page id, uuid v4>"]`.
 8. **Queryability.** `#h` plus `#d` page queries MUST be answered exactly, not
    by filtering after a row limit, so a quiet page's history is complete in a
    busy channel.
+9. **Library reads.** A filter for `PAGE_REVISION` with no `#h` is scoped to the
+   channels the reader can access, like any other channel-scoped kind, and is
+   served newest first (`created_at DESC, id ASC`) with the usual `until`
+   cursor. Clients build a page library from that window: a page's newest
+   revision is newer than all its others, so any page with a revision in the
+   window has its head in the window. A client that stops paging at a bound
+   MUST tell the reader the list may omit older pages.
 
 ## Accepting a suggestion
 

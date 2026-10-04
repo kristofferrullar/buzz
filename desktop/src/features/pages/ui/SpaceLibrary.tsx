@@ -12,6 +12,10 @@ import type { PageSummary } from "../lib/pageModel";
 import type { PageSelection, PagesHostBindings } from "../types";
 import { ROVING_ITEM_PROPS, useRovingList } from "./useRovingList";
 
+/**
+ * Shown for a page whose channel is not in the viewer's channel list, e.g. an
+ * open channel they have not joined. The relay still lets them read it.
+ */
 const UNKNOWN_CHANNEL_LABEL = "another channel";
 
 function channelLabelFor(channel: Channel | undefined): string {
@@ -22,6 +26,12 @@ function channelLabelFor(channel: Channel | undefined): string {
 type SpaceLibraryProps = PagesHostBindings & {
   communityId: string | null;
   onOpenPage: (selection: PageSelection) => void;
+  /**
+   * Page key (see `pageKey`) of the page the viewer just came back from. Focus
+   * returns to its row once, so keyboard users resume where they left off
+   * instead of at the top of the document.
+   */
+  restoreFocusKey?: string | null;
 };
 
 /**
@@ -31,6 +41,7 @@ type SpaceLibraryProps = PagesHostBindings & {
 export function SpaceLibrary({
   communityId,
   onOpenPage,
+  restoreFocusKey = null,
   useAuthorLabels,
 }: SpaceLibraryProps) {
   const query = usePagesLibraryQuery(communityId);
@@ -46,13 +57,32 @@ export function SpaceLibrary({
     () => new Map(channels.map((channel) => [channel.id, channel])),
     [channels],
   );
-  const { listProps, onRowFocus, tabStopIndex } = useRovingList(
-    pages?.length ?? 0,
+  const pageKeys = React.useMemo(
+    () => (pages ?? []).map((page) => page.key),
+    [pages],
   );
+  const { listProps, onRowFocus, tabStopKey } = useRovingList(pageKeys);
+  const listRef = listProps.ref;
   const handleOpen = React.useCallback(
     (channelId: string, pageId: string) => onOpenPage({ channelId, pageId }),
     [onOpenPage],
   );
+
+  // Restore focus to the row the viewer came back from, once per mount, even
+  // if that row no longer exists (a one-shot never retries on later updates).
+  const restoredFocusRef = React.useRef(false);
+  React.useEffect(() => {
+    if (restoredFocusRef.current || !restoreFocusKey || !pages) return;
+    restoredFocusRef.current = true;
+    const rows =
+      listRef.current?.querySelectorAll<HTMLElement>("[data-roving-item]");
+    for (const row of rows ?? []) {
+      if (row.dataset.pageKey === restoreFocusKey) {
+        row.focus();
+        return;
+      }
+    }
+  }, [listRef, pages, restoreFocusKey]);
 
   return (
     <div
@@ -82,7 +112,7 @@ export function SpaceLibrary({
 
         {query.isLoading ? (
           <BuzzLoadingState className="min-h-48" label="Loading pages" />
-        ) : query.isError ? (
+        ) : query.isError && !query.data ? (
           <div
             className="flex flex-col items-center gap-3 py-16 text-center"
             data-testid="pages-library-error"
@@ -105,20 +135,28 @@ export function SpaceLibrary({
           </div>
         ) : pages && pages.length > 0 ? (
           <>
+            {query.isError ? (
+              <p
+                className="text-sm text-destructive"
+                data-testid="pages-library-stale"
+                role="status"
+              >
+                Couldn&rsquo;t refresh. Showing the pages loaded earlier.
+              </p>
+            ) : null}
             <ul
               aria-label="Pages"
               className="space-y-2"
               data-testid="pages-library-list"
               {...listProps}
             >
-              {pages.map((page, index) => (
+              {pages.map((page) => (
                 <SpaceLibraryRow
                   authorLabel={authorLabel(page.updatedBy)}
                   channelLabel={channelLabelFor(
                     channelsById.get(page.channelId),
                   )}
-                  index={index}
-                  isTabStop={index === tabStopIndex}
+                  isTabStop={page.key === tabStopKey}
                   key={page.key}
                   onOpen={handleOpen}
                   onRowFocus={onRowFocus}
@@ -160,17 +198,15 @@ export function SpaceLibrary({
 type SpaceLibraryRowProps = {
   authorLabel: string;
   channelLabel: string;
-  index: number;
   isTabStop: boolean;
   onOpen: (channelId: string, pageId: string) => void;
-  onRowFocus: (index: number) => void;
+  onRowFocus: (pageKey: string) => void;
   page: PageSummary;
 };
 
 const SpaceLibraryRow = React.memo(function SpaceLibraryRow({
   authorLabel,
   channelLabel,
-  index,
   isTabStop,
   onOpen,
   onRowFocus,
@@ -185,9 +221,10 @@ const SpaceLibraryRow = React.memo(function SpaceLibraryRow({
         className="flex w-full min-w-0 items-center gap-3 rounded-xl border border-border/70 bg-muted/20 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         data-channel-id={page.channelId}
         data-page-id={page.pageId}
+        data-page-key={page.key}
         data-testid="pages-library-row"
         onClick={() => onOpen(page.channelId, page.pageId)}
-        onFocus={() => onRowFocus(index)}
+        onFocus={() => onRowFocus(page.key)}
         tabIndex={isTabStop ? 0 : -1}
         type="button"
       >
