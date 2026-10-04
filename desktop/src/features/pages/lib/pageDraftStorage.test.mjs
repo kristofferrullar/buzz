@@ -116,6 +116,19 @@ test("a finished save clears only the draft it saved, never newer typing", () =>
   });
   assert.equal(readPageDraft(storage, key)?.content, "# body, then more");
 
+  // A newer draft that differs only in its title survives too.
+  writePageDraft(storage, key, {
+    ...draft,
+    title: "Plan, renamed",
+    content: "# body, then more",
+  });
+  clearPageDraftIfSaved(storage, key, {
+    title: "Plan",
+    content: "# body, then more",
+  });
+  assert.equal(readPageDraft(storage, key)?.title, "Plan, renamed");
+  writePageDraft(storage, key, { ...draft, content: "# body, then more" });
+
   // Stored draft equals what was saved: cleared.
   clearPageDraftIfSaved(storage, key, {
     title: "Plan",
