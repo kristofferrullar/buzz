@@ -15,6 +15,8 @@ use crate::store::deletion::{
     DEFAULT_LEASE_DURATION, EXPECTED_SCOPED_TABLES, PURGE_SCOPED_TABLES,
 };
 
+mod ingest;
+
 // -- Fixtures ------------------------------------------------------------------
 
 async fn test_db() -> Db {

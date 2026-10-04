@@ -35,6 +35,13 @@
 //! soft-deleted in the same transaction, so a rebuild drops it instead of
 //! resurrecting it.
 //!
+//! ## Ingest
+//!
+//! The [`ingest`] submodule holds the transaction-bound primitives the relay
+//! composes to validate and store a page event atomically (reads of referenced
+//! events, the suggestion-closure check, the event insert, and deleting a page
+//! event while repairing the head).
+//!
 //! ## Concurrency
 //!
 //! Writers take a shared transaction-scoped advisory lock on the page's channel;
@@ -1071,6 +1078,14 @@ impl Db {
         Ok(report)
     }
 }
+
+mod ingest;
+pub use ingest::{
+    insert_page_event_in_transaction, is_lock_timeout, load_event_in_transaction,
+    lock_page_for_write_in_transaction, parse_page_event_id, parse_page_uuid,
+    soft_delete_page_event_in_transaction, suggestion_state_in_transaction, PageEventDeletion,
+    PageEventRecord, SuggestionState, PAGE_WRITE_LOCK_TIMEOUT_MS,
+};
 
 #[cfg(test)]
 mod parse_tests;
