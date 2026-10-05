@@ -1381,12 +1381,7 @@ async fn search_matches_a_page_only_through_its_head_over_req_and_query() {
         .publish(suggest(open, page, &r3, &word("suggestedbody")))
         .await;
     alice
-        .publish(resolve(
-            open,
-            page,
-            &suggestion,
-            PageResolution::Rejected,
-        ))
+        .publish(resolve(open, page, &suggestion, PageResolution::Rejected))
         .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -1415,11 +1410,9 @@ async fn search_matches_a_page_only_through_its_head_over_req_and_query() {
             .is_empty()
     );
     // Pages are opt-in by kind: a kindless search does not return them.
-    assert!(
-        !search_ids(&mut alice, &[], &word("charliebody"))
-            .await
-            .contains(&r3.id)
-    );
+    assert!(!search_ids(&mut alice, &[], &word("charliebody"))
+        .await
+        .contains(&r3.id));
 
     // The HTTP bridge answers the same.
     assert_eq!(
