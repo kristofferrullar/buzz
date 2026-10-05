@@ -55,11 +55,13 @@ test("adding to or clearing a page diffs against the empty document", () => {
 });
 
 test("the diff is time-boxed: a pathological rewrite reports too-different", () => {
-  const oldText = `${Array.from({ length: 30_000 }, (_, i) => `x${i % 2}`).join("\n")}\n`;
-  const newText = `${Array.from({ length: 30_000 }, (_, i) => `y${i % 3}`).join("\n")}\n`;
+  // Sized so the unbounded diff finishes in about a second: with the time box
+  // removed this fails on the status below instead of running for minutes.
+  const oldText = `${Array.from({ length: 2_000 }, (_, i) => `x${i % 2}`).join("\n")}\n`;
+  const newText = `${Array.from({ length: 2_000 }, (_, i) => `y${i % 3}`).join("\n")}\n`;
   const started = Date.now();
-  const result = buildPageDiff(oldText, newText, { timeoutMs: 50 });
+  const result = buildPageDiff(oldText, newText, { timeoutMs: 5 });
   assert.deepEqual(result, { status: "too-different" });
   // Bounded, not merely correct: it gave up promptly instead of finishing.
-  assert.ok(Date.now() - started < 2_000);
+  assert.ok(Date.now() - started < 500);
 });
