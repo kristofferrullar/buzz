@@ -4,6 +4,12 @@ import { buildPageDiff, PAGE_DIFF_FILE_NAME } from "../lib/pageDiff";
 import type { PagesHostBindings } from "../types";
 
 type PageDiffViewProps = Pick<PagesHostBindings, "DiffViewer"> & {
+  /**
+   * Shown in full when the versions are too different to diff in time, so a
+   * reviewer still sees what they are being asked to accept. Omit where the
+   * reader already has the text (the editor).
+   */
+  fallbackText?: string;
   /** Accessible name of the diff region. */
   label: string;
   newContent: string;
@@ -18,6 +24,7 @@ type PageDiffViewProps = Pick<PagesHostBindings, "DiffViewer"> & {
  */
 export function PageDiffView({
   DiffViewer,
+  fallbackText,
   label,
   newContent,
   oldContent,
@@ -58,12 +65,30 @@ export function PageDiffView({
           No differences.
         </p>
       ) : (
-        <p
-          className="text-sm text-muted-foreground"
-          data-testid="page-diff-too-different"
-        >
-          These versions differ too much to compare line by line.
-        </p>
+        <>
+          <p
+            className="text-sm text-muted-foreground"
+            data-testid="page-diff-too-different"
+          >
+            These versions differ too much to compare line by line.
+            {fallbackText === undefined
+              ? ""
+              : " The proposed text is shown in full instead."}
+          </p>
+          {fallbackText === undefined ? null : (
+            // Plain text in a text node (never parsed as markup), bounded by the
+            // relay's content limit.
+            <section
+              aria-label="Proposed text"
+              className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border/60 bg-background/40 p-3 font-mono text-xs outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+              data-testid="page-diff-fallback-text"
+              // biome-ignore lint/a11y/noNoninteractiveTabindex: the scrollable text must receive keyboard focus
+              tabIndex={0}
+            >
+              {fallbackText}
+            </section>
+          )}
+        </>
       )}
     </section>
   );

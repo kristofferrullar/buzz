@@ -988,3 +988,170 @@ test("with the preview flag off there are no write controls and nothing is publi
   await expect(page.getByTestId("page-editor")).toHaveCount(0);
   expect(await pageWrites(page)).toHaveLength(0);
 });
+
+// -- Review fixes: draft on window close, focus after failure, repeats, review --
+
+const storedDrafts = (page: Page) =>
+  page.evaluate(() =>
+    Object.keys(window.localStorage)
+      .filter((key) => key.startsWith("buzz.pages.draft.v1"))
+      .map((key) => JSON.parse(window.localStorage.getItem(key) ?? "null")),
+  );
+
+test("a draft typed just before the window goes away is stored without waiting for the autosave delay", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await openPage(page, Q4_TITLE);
+  await startEditing(page);
+  const draft = `${Q4_HEAD_CONTENT}\n- typed just before quitting`;
+  await contentField(page).fill(draft);
+
+  // Closing or quitting the window never unmounts the React tree, so only the
+  // page-lifecycle event can save what the 400 ms debounce has not written yet.
+  const stored = await page.evaluate(() => {
+    window.dispatchEvent(new Event("pagehide"));
+    return Object.keys(window.localStorage).filter((key) =>
+      key.startsWith("buzz.pages.draft.v1"),
+    ).length;
+  });
+  expect(stored).toBe(1);
+  expect((await storedDrafts(page))[0]).toMatchObject({
+    content: draft,
+    baseRevisionId: MOCK_PAGE_EVENT_IDS.q4Head,
+  });
+});
+
+test("after a failed save focus returns to the button that was used", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await openPage(page, Q4_TITLE);
+  await startEditing(page);
+  await contentField(page).fill(`${Q4_HEAD_CONTENT}\n- fail me`);
+
+  // Keyboard path: the button that started the write is disabled while it is in
+  // flight, which would otherwise leave focus on <body>.
+  await saveButton(page).focus();
+  await armFault(page, { kind: "reject", message: "invalid: boom" });
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("page-editor-error")).toBeVisible();
+  await expect(saveButton(page)).toBeFocused();
+
+  // Same for a failed suggestion, and a focus the user moved is left alone.
+  await page.getByTestId("page-editor-suggest").focus();
+  await armFault(page, { kind: "reject", message: "invalid: boom again" });
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("page-editor-error")).toContainText(
+    "boom again",
+  );
+  await expect(page.getByTestId("page-editor-suggest")).toBeFocused();
+  await contentField(page).focus();
+  await armFault(page, { kind: "reject", message: "invalid: third" });
+  await page.keyboard.press("Control+s");
+  await expect(page.getByTestId("page-editor-error")).toContainText("third");
+  await expect(contentField(page)).toBeFocused();
+});
+
+test("holding the save chord after a failed save does not resend the write", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await openPage(page, Q4_TITLE);
+  await startEditing(page);
+  await contentField(page).fill(`${Q4_HEAD_CONTENT}\n- held`);
+  await contentField(page).focus();
+
+  await armFault(page, { kind: "reject", message: "invalid: nope" });
+  await page.keyboard.down("Control");
+  await page.keyboard.down("s");
+  await expect(page.getByTestId("page-editor-error")).toBeVisible();
+  // Auto-repeat keydowns while the keys stay down are not new save requests.
+  await page.keyboard.down("s");
+  await page.keyboard.down("s");
+  await page.waitForTimeout(200);
+  await page.keyboard.up("s");
+  await page.keyboard.up("Control");
+  expect(await pageWrites(page)).toHaveLength(1);
+  await expect(page.getByTestId("page-editor")).toBeVisible();
+});
+
+test("two triggers in the same tick publish one revision", async ({ page }) => {
+  await installMockBridge(page);
+  await openPage(page, Q4_TITLE);
+  await startEditing(page);
+  await contentField(page).fill(`${Q4_HEAD_CONTENT}\n- once`);
+  await armFault(page, { kind: "delay", ms: 300 });
+
+  // React has not re-rendered between two calls made in one task, so the
+  // disabled button and the phase cannot be what stops the second one.
+  await page.evaluate(() => {
+    const button = document.querySelector<HTMLButtonElement>(
+      '[data-testid="page-editor-save"]',
+    );
+    button?.click();
+    button?.click();
+  });
+  await expect(page.getByTestId("page-editor")).toHaveCount(0);
+  expect(await pageWrites(page)).toHaveLength(1);
+});
+
+test("a suggestion too different to diff still shows its text to the reviewer", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await openPage(page, Q4_TITLE);
+
+  // A page of 8000 lines (in a code fence, which is cheap to render), then a
+  // suggestion that rewrites all of it: a line diff of that takes seconds, so it
+  // is cut off and must not leave the reviewer with nothing to look at. Both are
+  // pushed as live events; typing 24 KB into the editor is not what is tested.
+  const fenced = (prefix: string, modulus: number) =>
+    `\`\`\`\n${Array.from({ length: 8000 }, (_, i) => `${prefix}${i % modulus}`).join("\n")}\n\`\`\``;
+  const bigHead = "f1".repeat(32);
+  const bigSuggestion = "f2".repeat(32);
+  await waitForLiveSubscription(page);
+  await pushRevision(page, {
+    content: fenced("x", 2),
+    id: bigHead,
+    prev: MOCK_PAGE_EVENT_IDS.q4Head,
+  });
+  await expect(page.getByTestId("page-content")).toContainText("x0", {
+    timeout: 30_000,
+  });
+  await page.evaluate(
+    ({ alice, base, channelId, content, id, pageId }) => {
+      window.__BUZZ_E2E_PUSH_MOCK_PAGE_EVENT__?.({
+        id,
+        pubkey: alice,
+        created_at: Math.floor(Date.now() / 1000) + 2,
+        kind: 52001,
+        tags: [
+          ["h", channelId],
+          ["d", pageId],
+          ["base", base],
+        ],
+        content,
+        sig: "mocksig".repeat(20).slice(0, 128),
+      });
+    },
+    {
+      alice: ALICE_PUBKEY,
+      base: bigHead,
+      channelId: MOCK_PAGE_CHANNEL_IDS.general,
+      content: `${fenced("y", 3)}\nunique-proposed-tail`,
+      id: bigSuggestion,
+      pageId: MOCK_PAGE_IDS.q4Plan,
+    },
+  );
+  const row = page.locator(`[data-suggestion-id="${bigSuggestion}"]`);
+  await expect(row).toBeVisible({ timeout: 30_000 });
+  await row.getByTestId("page-suggestion-view").click();
+  await expect(page.getByTestId("page-diff-too-different")).toBeVisible({
+    timeout: 30_000,
+  });
+  const text = page.getByTestId("page-diff-fallback-text");
+  await expect(text).toBeVisible();
+  await expect(text).toHaveAttribute("tabindex", "0");
+  await expect(text).toContainText("unique-proposed-tail");
+});

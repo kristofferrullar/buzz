@@ -20,6 +20,8 @@ import {
   writePageDraft,
 } from "../lib/pageDraftStorage";
 import type { PageRevision } from "../lib/pageModel";
+import type { PageWriteResult } from "../lib/pageWrite";
+import { classifyPageWriteError } from "../lib/pageWriteErrors";
 import {
   type PageDraftIssue,
   type PageDraftText,
@@ -157,6 +159,10 @@ export function usePageEditor({
   const mountedRef = React.useRef(true);
   // The session is over (saved or discarded): nothing may be autosaved after it.
   const finishedRef = React.useRef(false);
+  // A write is in flight. `state.phase` only reflects it after the next render,
+  // so a second call in the same tick (a replayed or programmatic trigger) must
+  // be refused here, not by the phase.
+  const inFlightRef = React.useRef(false);
 
   const [reloading, setReloading] = React.useState(false);
   const [reloadError, setReloadError] = React.useState<string | null>(null);
@@ -226,8 +232,25 @@ export function usePageEditor({
     return () => window.clearTimeout(timer);
   }, [dirty, draftKey, flushDraft, saving, state.draft]);
 
-  // Closing the window or leaving the page keeps what was typed.
+  // Leaving the page keeps what was typed.
   React.useEffect(() => flushDraft, [flushDraft]);
+
+  // Closing or quitting the window never unmounts the tree, so the unmount flush
+  // above does not run and the debounce may not have fired yet: write the draft
+  // when the page goes away or is hidden.
+  React.useEffect(() => {
+    const flushOnHide = () => {
+      if (document.visibilityState === "hidden") flushDraft();
+    };
+    window.addEventListener("pagehide", flushDraft);
+    window.addEventListener("beforeunload", flushDraft);
+    document.addEventListener("visibilitychange", flushOnHide);
+    return () => {
+      window.removeEventListener("pagehide", flushDraft);
+      window.removeEventListener("beforeunload", flushDraft);
+      document.removeEventListener("visibilitychange", flushOnHide);
+    };
+  }, [flushDraft]);
 
   // -- Actions ----------------------------------------------------------------
 
@@ -242,7 +265,7 @@ export function usePageEditor({
     async (action: EditorAction) => {
       const current = stateRef.current;
       const currentTarget = targetRef.current;
-      if (current.phase.kind === "saving") return;
+      if (current.phase.kind === "saving" || inFlightRef.current) return;
 
       // Judged against the live head, so a hotkey cannot slip past what the
       // buttons disable.
@@ -268,25 +291,35 @@ export function usePageEditor({
       const { generation } = current;
       const text = current.draft;
       const title = normalizePageTitle(text.title);
+      inFlightRef.current = true;
       dispatch({ type: "submitted", action });
 
       const { channelId, pageId } = currentTarget;
-      const result =
-        action === "suggest"
-          ? await writer.publishSuggestion({
-              channelId,
-              pageId,
-              // The suggestion edits the revision the text was written against.
-              base: current.baseRevisionId ?? "",
-              content: text.content,
-            })
-          : await writer.publishRevision({
-              channelId,
-              pageId,
-              title,
-              content: text.content,
-              prev: current.baseRevisionId,
-            });
+      let result: PageWriteResult;
+      try {
+        result =
+          action === "suggest"
+            ? await writer.publishSuggestion({
+                channelId,
+                pageId,
+                // The suggestion edits the revision the text was written against.
+                base: current.baseRevisionId ?? "",
+                content: text.content,
+              })
+            : await writer.publishRevision({
+                channelId,
+                pageId,
+                title,
+                content: text.content,
+                prev: current.baseRevisionId,
+              });
+      } catch (error) {
+        // The writer resolves to a result and does not throw; if something
+        // around it does, the draft must still come back out of "saving".
+        result = { ok: false, error: classifyPageWriteError(error) };
+      } finally {
+        inFlightRef.current = false;
+      }
 
       if (result.ok) {
         // Clear by content, not unconditionally: this may resolve after the user

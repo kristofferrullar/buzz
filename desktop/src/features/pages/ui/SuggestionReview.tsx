@@ -60,6 +60,7 @@ export function SuggestionReview({
       </div>
       <PageDiffView
         DiffViewer={DiffViewer}
+        fallbackText={suggestion.content}
         label="Proposed changes"
         newContent={suggestion.content}
         oldContent={base.revision.content}

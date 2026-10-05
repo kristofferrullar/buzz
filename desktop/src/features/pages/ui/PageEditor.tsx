@@ -40,14 +40,16 @@ type PageEditorProps = Pick<PagesHostBindings, "DiffViewer"> & {
 
 /**
  * `Cmd+S` or `Ctrl+S`, and nothing else: not both modifiers, no Shift (that is
- * "save as" elsewhere) and no Alt (it types characters on some layouts).
+ * "save as" elsewhere), no Alt (it types characters on some layouts) and not an
+ * auto-repeat, so holding the chord after a failed save does not resend it.
  */
 function isSaveChord(event: React.KeyboardEvent): boolean {
   return (
     event.key.toLowerCase() === "s" &&
     event.metaKey !== event.ctrlKey &&
     !event.shiftKey &&
-    !event.altKey
+    !event.altKey &&
+    !event.repeat
   );
 }
 
@@ -92,6 +94,8 @@ export function PageEditor({
   const titleRef = React.useRef<HTMLInputElement>(null);
   const contentRef = React.useRef<HTMLTextAreaElement>(null);
   const recoveryRef = React.useRef<HTMLButtonElement>(null);
+  const saveRef = React.useRef<HTMLButtonElement>(null);
+  const suggestRef = React.useRef<HTMLButtonElement>(null);
   const [pane, setPane] = React.useState<Pane>("preview");
   const deferredContent = React.useDeferredValue(draft.content);
 
@@ -113,6 +117,19 @@ export function PageEditor({
   React.useEffect(() => {
     if (conflictRaised) recoveryRef.current?.focus();
   }, [conflictRaised]);
+
+  // The button that started a write is disabled while it is in flight, which
+  // drops focus to <body>. When the write fails with the draft intact, put focus
+  // back on that button so the way to retry is reachable from the keyboard. A
+  // focus the user has moved elsewhere in the meantime is left alone.
+  const failedAction = phase.kind === "failed" ? phase.action : null;
+  React.useEffect(() => {
+    if (failedAction === null) return;
+    const active = document.activeElement;
+    if (active === null || active === document.body) {
+      (failedAction === "suggest" ? suggestRef : saveRef).current?.focus();
+    }
+  }, [failedAction]);
 
   // Re-applying the user's text on a newer head ends the banner (and the button
   // that triggered it): return focus to the text and show what will change.
@@ -381,6 +398,7 @@ export function PageEditor({
           data-testid="page-editor-save"
           disabled={!editor.canSave}
           onClick={() => void editor.submit("save")}
+          ref={saveRef}
           size="sm"
           type="button"
         >
@@ -396,6 +414,7 @@ export function PageEditor({
             data-testid="page-editor-suggest"
             disabled={!editor.canSuggest}
             onClick={() => void editor.submit("suggest")}
+            ref={suggestRef}
             size="sm"
             type="button"
             variant="outline"
