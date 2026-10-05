@@ -163,6 +163,7 @@ Results are newest first (`created_at` descending, ties by id).
 | Suggestions of a page and how they were resolved | `{"kinds":[52001,52002], "#h":["<channel>"], "#d":["<page>"]}`; a suggestion is also closed by a revision's `suggestion` tag, so read the history too |
 | Library of a channel | `{"kinds":[52000], "#h":["<channel>"]}`; a page's head is its newest revision |
 | Library across channels | `{"kinds":[52000]}`; scoped to the reader's channels (rule 9), paged with `until` set to the oldest `created_at` received (a boundary event can repeat; dedupe by id) |
+| Search pages | `{"kinds":[52000], "search":"<text>"}`, optionally `"#h":["<channel>"]`; returns head revisions only (see Search) |
 | Number of revisions | the history filter in `COUNT` |
 | Live updates | the same filters in a REQ subscription; new events fan out like any channel event |
 
@@ -223,6 +224,7 @@ including deleted ones (revisions that fail the tag rules above are skipped):
 | title, `updated_by`, `updated_at` | the head revision's title, author and own `created_at` (event time, never relay wall-clock time) |
 | `created_by`, `created_at` | the root revision's author and `created_at`; with several roots, the earliest, ties to the lowest event id |
 | revision count | every stored revision of the page, deleted ones included |
+| search text | `to_tsvector('simple', title)` at weight A followed by `to_tsvector('simple', content)` of the head event; NULL (never matches) when the head event is missing, deleted or not a revision (see Search) |
 
 A page with no live head has no index row. A page is deleted by soft-deleting
 its revision, suggestion and resolution events in the same atomic operation as
@@ -245,11 +247,32 @@ events; the library excludes pages of deleted channels at read time.
 
 ## Search
 
-P1 does not integrate pages with search. Until it does, page kinds follow the
-relay's default full-text indexing, so superseded revisions and suggestions can
-match NIP-50 queries. Returning head revisions only requires either excluding
-page kinds from the generic index or page-aware filtering in the search path;
-that choice is deferred (see the open questions).
+A page matches NIP-50 `search` **only through its head revision**: the relay
+matches the search text against the head's title and content and nothing else.
+Superseded revisions, suggestions, resolutions, soft-deleted pages and deleted
+events never match, and a page is one hit however many revisions mention the
+text.
+
+- **Opt in by kind.** Pages are searched when the filter's `kinds` names
+  `52000`: `{"kinds":[52000], "search":"roadmap"}`. A kindless search keeps
+  returning only the relay's default searchable kinds (page revisions are not
+  among them), and a filter naming only `52001` or `52002` matches nothing,
+  because suggestions and resolutions are never searchable. A filter may mix
+  kinds (`[9, 52000]`); hits are ranked together.
+- **Scope.** Hits are the head revision events, scoped like any channel event:
+  the reader sees only channels it can access, `#h` narrows to a channel, and
+  `authors`, `since` and `until` apply to the head revision's author and its
+  `created_at`. REQ with `search` and HTTP `POST /query` behave identically.
+  `COUNT` does not evaluate `search` for any kind.
+- **Matching.** The `simple` text-search configuration, as for other kinds
+  (no stemming); a title match ranks above a content match.
+- **Index.** The relay projects each page's searchable text (the head's title,
+  weight A, and content) into its `pages` row, maintained by the database
+  whenever the head moves (create, accept, delete-repair, rebuild), and indexes
+  it. It is part of the rebuild invariant below. Page kinds are excluded from
+  the generic event index in the search query, so no policy of the underlying
+  full-text column (which differs between a database built from migrations and
+  one upgraded in place) can make a non-head revision match.
 
 ## Privacy
 
@@ -274,9 +297,12 @@ at the protocol level needs a trusted agent-role signal and is an open question.
   and caps content at 64 KiB but does not prune history; a rebuild by replay
   refuses a page with more than 100,000 revisions rather than truncating it, so
   a cap or compaction must land before a page can grow that far.
-- Search: exclude page kinds from the generic index vs page-aware filtering.
 - A server-side library listing (the `pages` index is not yet readable over the
   wire; clients assemble the library from revisions).
 - Optional opt-in NIP-23 publication for pages in public channels.
 
 Resolved: **write scope** mirrors canvas (`channels:write`); see "Write scope".
+Resolved: **search** is page-aware filtering in the search query plus an indexed
+projection of the head on the page's own row, not an exclusion from (or change
+to) the generic event index: that index cannot express "head revisions only"
+and its policy differs by how a relay's database was built; see "Search".

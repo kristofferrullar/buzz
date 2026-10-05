@@ -1215,11 +1215,12 @@ INSERT INTO replica_heartbeat (id) VALUES (1);
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('replica_heartbeat', 'single-row replication freshness token; describes deployment topology, never tenant data');
 
--- ── Pages head index (NIP-PG, fork-private migration 9001) ───────────────────
+-- ── Pages head index (NIP-PG, fork-private migrations 9001 and 9002) ─────────
 -- Projection of the PAGE_REVISION event log (kind 52000): one row per page,
 -- identified by the NIP-PG (h, d) pair, naming its current head revision.
 -- Rebuildable by replaying those events. Kept in lock-step with
--- migrations/9001_pages_index.sql (see docs/pages-fork-upgrade.md, rule 5); a
+-- migrations/9001_pages_index.sql and migrations/9002_pages_search.sql (see
+-- docs/pages-fork-upgrade.md, rule 5); a
 -- parity test compares the pgschema-built catalog with the migrated one. This
 -- block sits above the community write fence section below on purpose: the
 -- dynamic fence loop there attaches the fence to every community_id table that
