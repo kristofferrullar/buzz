@@ -149,10 +149,16 @@ export function usePagesLiveUpdates(
       notePageEvent(pending, event);
       debounced.trigger();
     };
+    // Several chunks become ready within moments of each other; one refresh
+    // covers them all instead of restarting the refetch once per chunk.
+    const onReady = () => {
+      pending.everything = true;
+      debounced.trigger();
+    };
 
     for (const filter of filters) {
       relayClient
-        .subscribeLive(filter, onLiveEvent, invalidate)
+        .subscribeLive(filter, onLiveEvent, onReady)
         .then((dispose) => {
           if (disposed) void dispose();
           else disposers.push(dispose);
