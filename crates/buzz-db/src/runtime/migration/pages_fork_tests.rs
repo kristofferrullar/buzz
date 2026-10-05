@@ -431,8 +431,8 @@ mod postgres_tests {
         sqlx::query(
             "INSERT INTO channels (id, community_id, name, created_by) VALUES ($1, $2, 'c', $3)",
         )
-        .bind(community)
         .bind(channel)
+        .bind(community)
         .bind(vec![1_u8; 32])
         .execute(&db.pool)
         .await

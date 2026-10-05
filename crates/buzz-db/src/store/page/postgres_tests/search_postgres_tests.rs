@@ -65,23 +65,39 @@ async fn search_vector_follows_the_head_through_create_advance_repair_and_rebuil
     let vector = search_vector(&db, community, channel, page).await;
     assert!(names(&vector, "betatitle") && !names(&vector, "sidetitle"));
 
-    // Delete-repair: soft-deleting the head and re-projecting falls back to its
-    // prev, and the vector follows.
+    // Delete-repair: soft-deleting the head and re-projecting makes the live
+    // fork tip (`side`, also based on r1) the head, and the vector follows it.
     crate::event::soft_delete_event(&db.pool, community, r2.id.as_bytes())
         .await
         .expect("delete head event");
     let mut tx = db.begin_event_write_transaction().await.expect("tx");
-    reproject_page_in_transaction(&mut tx, community, channel, page)
+    let record = reproject_page_in_transaction(&mut tx, community, channel, page)
         .await
         .expect("reproject")
         .expect("page still has live revisions");
     tx.commit().await.expect("commit");
+    assert_eq!(record.head_event_id, id32(&side));
+    let repaired = search_vector(&db, community, channel, page).await;
+    assert!(names(&repaired, "sidetitle"), "{repaired:?}");
+    assert!(
+        !names(&repaired, "betatitle") && !names(&repaired, "alphatitle"),
+        "neither the deleted head nor an older revision may stay searchable: {repaired:?}"
+    );
+
+    // Deleting that tip too walks back to the root revision.
+    crate::event::soft_delete_event(&db.pool, community, side.id.as_bytes())
+        .await
+        .expect("delete fork tip");
+    let mut tx = db.begin_event_write_transaction().await.expect("tx");
+    let record = reproject_page_in_transaction(&mut tx, community, channel, page)
+        .await
+        .expect("reproject")
+        .expect("the root revision is still live");
+    tx.commit().await.expect("commit");
+    assert_eq!(record.head_event_id, id32(&r1));
     let repaired = search_vector(&db, community, channel, page).await;
     assert!(names(&repaired, "alphatitle"), "{repaired:?}");
-    assert!(
-        !names(&repaired, "betatitle"),
-        "a deleted head must not stay searchable: {repaired:?}"
-    );
+    assert!(!names(&repaired, "sidetitle"), "{repaired:?}");
 
     // Rebuild by replay reproduces the vector exactly (NIP-PG rebuild
     // invariant: the projection is derived data).

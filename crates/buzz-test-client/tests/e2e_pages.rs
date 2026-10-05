@@ -1290,6 +1290,217 @@ async fn deleting_page_events_repairs_the_head() {
     );
 }
 
+/// Ids of the page revisions a NIP-50 REQ returns for `text` (kinds as given).
+async fn search_ids(session: &mut Session, kinds: &[u32], text: &str) -> HashSet<EventId> {
+    let mut filter = Filter::new().search(text);
+    if !kinds.is_empty() {
+        filter = filter.kinds(kinds.iter().map(|k| kind(*k)));
+    }
+    ids(&session.query(filter).await)
+}
+
+/// The same search over the HTTP bridge (`POST /query`), as `pubkey`.
+async fn http_search_ids(pubkey_hex: &str, kinds: &[u32], text: &str) -> HashSet<String> {
+    let http = relay_url()
+        .replace("wss://", "https://")
+        .replace("ws://", "http://");
+    let filters = serde_json::json!([{ "kinds": kinds, "search": text, "limit": 50 }]);
+    let response = reqwest::Client::new()
+        .post(format!("{}/query", http.trim_end_matches('/')))
+        .header("X-Pubkey", pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(filters.to_string())
+        .send()
+        .await
+        .expect("POST /query");
+    assert!(
+        response.status().is_success(),
+        "search over /query failed: {}",
+        response.status()
+    );
+    let events: Vec<serde_json::Value> = response.json().await.expect("query json");
+    events
+        .iter()
+        .map(|event| event["id"].as_str().expect("event id").to_owned())
+        .collect()
+}
+
+/// NIP-PG Search: a page matches NIP-50 `search` only through its head
+/// revision, over REQ and over `POST /query`, scoped to the reader's channels.
+/// Superseded revisions and suggestions never match, an edit moves the match,
+/// and deleting the head hands it back to the previous revision.
+#[tokio::test]
+#[ignore]
+async fn search_matches_a_page_only_through_its_head_over_req_and_query() {
+    let url = relay_url();
+    let mut alice = Session::connect(&url).await;
+    let mut bob = Session::connect(&url).await;
+    let open = alice.create_channel("open").await;
+    let private = alice.create_channel("private").await;
+    // The relay's database outlives a run: every searched word is unique to it.
+    let run = Uuid::new_v4().simple().to_string();
+    let word = |name: &str| format!("{name}{run}");
+    let alice_hex = alice.keys.public_key().to_hex();
+    let bob_hex = bob.keys.public_key().to_hex();
+    let revision_kind = [KIND_PAGE_REVISION];
+    let all_page_kinds = [
+        KIND_PAGE_REVISION,
+        KIND_PAGE_SUGGESTION,
+        KIND_PAGE_SUGGESTION_RESOLUTION,
+    ];
+
+    let page = Uuid::new_v4();
+    let r1 = alice
+        .publish(revision(
+            open,
+            page,
+            &word("titlealpha"),
+            &format!("{} {}", word("alphabody"), word("shared")),
+            PageEdit::Create,
+        ))
+        .await;
+    let r2 = alice
+        .publish(revision(
+            open,
+            page,
+            &word("titlebravo"),
+            &format!("{} {}", word("bravobody"), word("shared")),
+            edit(&r1),
+        ))
+        .await;
+    let r3 = alice
+        .publish(revision(
+            open,
+            page,
+            &word("titlecharlie"),
+            &format!("{} {}", word("charliebody"), word("shared")),
+            edit(&r2),
+        ))
+        .await;
+    let suggestion = alice
+        .publish(suggest(open, page, &r3, &word("suggestedbody")))
+        .await;
+    alice
+        .publish(resolve(
+            open,
+            page,
+            &suggestion,
+            PageResolution::Rejected,
+        ))
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let head = |event: &Event| HashSet::from([event.id]);
+    // Only the head revision matches, by its content, its title, or a word every
+    // revision shares (one hit for the page, not three).
+    for text in [word("charliebody"), word("titlecharlie"), word("shared")] {
+        assert_eq!(
+            search_ids(&mut alice, &revision_kind, &text).await,
+            head(&r3),
+            "{text}"
+        );
+    }
+    for stale in [word("alphabody"), word("bravobody"), word("titlealpha")] {
+        assert!(
+            search_ids(&mut alice, &revision_kind, &stale)
+                .await
+                .is_empty(),
+            "a superseded revision must not match: {stale}"
+        );
+    }
+    // Suggestions and resolutions never match, even when named explicitly.
+    assert!(
+        search_ids(&mut alice, &all_page_kinds, &word("suggestedbody"))
+            .await
+            .is_empty()
+    );
+    // Pages are opt-in by kind: a kindless search does not return them.
+    assert!(
+        !search_ids(&mut alice, &[], &word("charliebody"))
+            .await
+            .contains(&r3.id)
+    );
+
+    // The HTTP bridge answers the same.
+    assert_eq!(
+        http_search_ids(&alice_hex, &revision_kind, &word("charliebody")).await,
+        HashSet::from([r3.id.to_hex()])
+    );
+    assert!(
+        http_search_ids(&alice_hex, &revision_kind, &word("alphabody"))
+            .await
+            .is_empty()
+    );
+
+    // An edit moves the match to the new head.
+    let r4 = alice
+        .publish(revision(
+            open,
+            page,
+            &word("titledelta"),
+            &word("deltabody"),
+            edit(&r3),
+        ))
+        .await;
+    assert_eq!(
+        search_ids(&mut alice, &revision_kind, &word("deltabody")).await,
+        head(&r4)
+    );
+    assert!(search_ids(&mut alice, &revision_kind, &word("charliebody"))
+        .await
+        .is_empty());
+
+    // Deleting the head (NIP-09) falls back to the previous revision, and the
+    // search follows the repaired head.
+    alice
+        .publish(EventBuilder::new(Kind::Custom(5), "").tags([
+            Tag::parse(["h", &open.to_string()]).unwrap(),
+            Tag::parse(["e", &r4.id.to_hex()]).unwrap(),
+        ]))
+        .await;
+    assert_eq!(
+        search_ids(&mut alice, &revision_kind, &word("charliebody")).await,
+        head(&r3)
+    );
+    assert!(search_ids(&mut alice, &revision_kind, &word("deltabody"))
+        .await
+        .is_empty());
+
+    // A reader who cannot read the channel finds nothing, over both doors.
+    let secret_page = Uuid::new_v4();
+    let secret = alice
+        .publish(revision(
+            private,
+            secret_page,
+            &word("secrettitle"),
+            &word("secretbody"),
+            PageEdit::Create,
+        ))
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        search_ids(&mut alice, &revision_kind, &word("secretbody")).await,
+        head(&secret)
+    );
+    assert!(search_ids(&mut bob, &revision_kind, &word("secretbody"))
+        .await
+        .is_empty());
+    assert_eq!(
+        http_search_ids(&alice_hex, &revision_kind, &word("secretbody")).await,
+        HashSet::from([secret.id.to_hex()])
+    );
+    assert!(
+        http_search_ids(&bob_hex, &revision_kind, &word("secretbody"))
+            .await
+            .is_empty()
+    );
+    // ...while bob, who can read the open channel, finds its page.
+    assert_eq!(
+        search_ids(&mut bob, &revision_kind, &word("charliebody")).await,
+        head(&r3)
+    );
+}
+
 /// NIP-PG rule 9: a `#h`-less filter for revisions is scoped to the channels the
 /// reader can access, newest first, and pages with `until`. The author filter
 /// only keeps this test's events apart from other tests' pages in open channels;
