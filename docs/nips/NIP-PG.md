@@ -100,10 +100,13 @@ reply).
 9. **Library reads.** A filter for `PAGE_REVISION` with no `#h` is scoped to the
    channels the reader can access, like any other channel-scoped kind, and is
    served newest first (`created_at DESC, id ASC`) with the usual `until`
-   cursor. Clients build a page library from that window: a page's newest
-   revision is newer than all its others, so any page with a revision in the
-   window has its head in the window. A client that stops paging at a bound
-   MUST tell the reader the list may omit older pages.
+   cursor. Clients build a page library from that window: a page's head is
+   never older than its other revisions, so any page with a revision in the
+   window has its head in the window, except that a window cut inside one
+   second can hold only the older of two revisions made in that second (paging
+   with the inclusive `until` above repeats that second and completes it). A
+   client that stops paging at a bound MUST tell the reader the list may omit
+   older pages.
 
 ## Write scope
 
@@ -171,15 +174,23 @@ fans an event out just after it answers the writer, so an event stored a moment
 ago can arrive twice before EOSE (as history and as a live event). Clients
 dedupe by event id.
 
-A page's head is the revision no other revision names as `prev`; clients read it
-as the newest revision, or follow `prev` for a fork. There is no server-side
+A page's head is the revision no other revision names as `prev` (a *tip*); with
+several tips it is the one with the greatest `created_at`, ties to the lowest
+event id, as in the Rebuild Invariant. Clients resolve it from the `prev` links
+and must not take the first event of a newest-first read: the read order breaks
+`created_at` ties by event id, so two edits made in the same second can list the
+older one first (an agent's quick successive edits do this routinely). For the
+same reason a client that prints history orders the events of one second by what
+they point at (`prev`, `base`, `e`), newest first. There is no server-side
 library listing yet: the relay's `pages` index is internal.
 
 ## Errors
 
 A rejected event is answered `["OK", id, false, "<message>"]` (HTTP `POST /events`
 answers 400 with the same message). The prefix is the machine-readable part;
-clients map `conflict:` to "refetch and retry" (CLI exit code 5).
+clients map `conflict:` to "refetch and retry" (CLI exit code 5). The CLI also
+maps `invalid:` to exit 1 (a rejected input) and `restricted:` to exit 3, and
+treats an accepted `duplicate:` answer as success.
 
 | Message | Meaning |
 |---------|---------|
