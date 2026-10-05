@@ -183,7 +183,11 @@ async fn mk_community(pool: &PgPool, host: &str) -> CommunityId {
 }
 
 async fn mk_channel(pool: &PgPool, community: CommunityId) -> Uuid {
-    let id = Uuid::new_v4();
+    mk_channel_with_id(pool, community, Uuid::new_v4()).await
+}
+
+/// A channel with a chosen id (the same uuid may exist in two communities).
+async fn mk_channel_with_id(pool: &PgPool, community: CommunityId, id: Uuid) -> Uuid {
     sqlx::query(
         "INSERT INTO channels (id, community_id, name, created_by) VALUES ($1, $2, $3, $4)",
     )
@@ -846,9 +850,11 @@ fn community_isolation<'a>(
         assert_eq!(hit_ids(&hits_b), vec![head_b], "{policy:?}: B sees only B");
 
         // A damaged index row in B that names A's head event id must not
-        // surface A's content to B: the join carries the community on both
-        // sides, not the event id alone.
-        let chan_b2 = mk_channel(pool, b).await;
+        // surface A's content to B: the community fence applies to the head
+        // event itself, not only to the page row. The row reuses A's channel
+        // uuid (legal: a channel id may exist in two communities) and A's head
+        // timestamp, so every other guard (channel, kind, time) would pass.
+        let chan_b2 = mk_channel_with_id(pool, b, chan_a).await;
         insert_damaged_page_row(
             pool,
             b,
