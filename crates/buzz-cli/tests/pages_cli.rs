@@ -151,6 +151,65 @@ fn a_reachable_failure_is_not_an_input_error() {
     assert_ne!(run.code, 1, "stderr: {}", run.stderr);
 }
 
+// -- Agent-facing docs stay in step with the binary -----------------------------------------------
+
+/// The `buzz` agent skill (the file `.claude/skills/sprout-cli/SKILL.md` links to).
+const SKILL: &str = include_str!("../../../desktop/src-tauri/src/managed_agents/nest_skill.md");
+const README: &str = include_str!("../README.md");
+
+fn pages_subcommands() -> Vec<String> {
+    // `buzz pages --help` lists "  <name>  <about>" under Commands.
+    let out = Cli::new(UNREACHABLE).run(&["pages", "--help"]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    out.stdout
+        .lines()
+        .skip_while(|l| !l.starts_with("Commands:"))
+        .skip(1)
+        .take_while(|l| l.starts_with("  "))
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|name| *name != "help")
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn the_readme_lists_every_pages_subcommand() {
+    let names = pages_subcommands();
+    assert!(names.len() >= 8, "{names:?}");
+    for name in &names {
+        assert!(
+            README.contains(&format!("buzz pages {name} "))
+                || README.contains(&format!("| `{name}` |")),
+            "crates/buzz-cli/README.md does not document `buzz pages {name}`"
+        );
+    }
+}
+
+#[test]
+fn the_agent_skill_teaches_suggest_base_and_exit_5() {
+    for needle in [
+        "buzz pages suggest <page-id> --channel <uuid> --base <head>",
+        "Agents suggest; people accept",
+        "`--base` is required for every edit and suggestion",
+        "Exit code 5 means the page moved since you read it",
+        "Never retry with the same stale `--base`",
+    ] {
+        assert!(SKILL.contains(needle), "the agent skill lost: {needle}");
+    }
+    // The skill names only commands that exist.
+    let names = pages_subcommands();
+    for named in ["get", "suggest", "accept", "reject", "set", "history"] {
+        assert!(
+            names.iter().any(|n| n == named),
+            "no `pages {named}` command"
+        );
+        assert!(
+            SKILL.contains(&format!("pages {named}")),
+            "the agent skill does not mention `pages {named}`"
+        );
+    }
+}
+
 // -- Live: the whole workflow against a relay -----------------------------------------------------
 
 fn relay_url() -> String {
