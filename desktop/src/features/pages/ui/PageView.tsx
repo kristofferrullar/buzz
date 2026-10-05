@@ -102,6 +102,7 @@ export function PageView({
             <PageDetailBody
               detail={detail}
               historyTruncated={query.data?.truncated === true}
+              suggestionsTruncated={query.data?.suggestionsTruncated === true}
               useAuthorLabels={useAuthorLabels}
             />
           </>
@@ -125,11 +126,13 @@ export function PageView({
 type PageDetailBodyProps = Pick<PagesHostBindings, "useAuthorLabels"> & {
   detail: PageDetail;
   historyTruncated: boolean;
+  suggestionsTruncated: boolean;
 };
 
 function PageDetailBody({
   detail,
   historyTruncated,
+  suggestionsTruncated,
   useAuthorLabels,
 }: PageDetailBodyProps) {
   const { channels, nonDmChannelNames } = useChannelNavigation();
@@ -242,6 +245,7 @@ function PageDetailBody({
           <PendingSuggestions
             authorLabel={authorLabel}
             suggestions={detail.suggestions}
+            truncated={suggestionsTruncated}
           />
           <HistorySection
             authorLabel={authorLabel}

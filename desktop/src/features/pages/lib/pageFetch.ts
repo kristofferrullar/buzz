@@ -11,13 +11,16 @@ import type { RelayEvent } from "@/shared/api/types";
 import {
   buildLibrary,
   buildPageDetail,
-  PAGE_EVENT_KINDS,
   parsePageEvents,
   type PageDetail,
   type PageIdentity,
   type PageSummary,
 } from "./pageModel";
-import { KIND_PAGE_REVISION } from "@/shared/constants/kinds";
+import {
+  KIND_PAGE_REVISION,
+  KIND_PAGE_SUGGESTION,
+  KIND_PAGE_SUGGESTION_RESOLUTION,
+} from "@/shared/constants/kinds";
 
 /**
  * Events per REQ. The relay clamps `limit` to its advertised ceiling (1000),
@@ -102,12 +105,35 @@ export type PagesLibrary = {
 };
 
 /**
+ * Events strictly newer than the oldest second in `events`, or all of them when
+ * that would leave nothing.
+ *
+ * A read that stopped at its bound can end inside one second, and the relay
+ * lists a second's events by id, not by causality: the window may hold a
+ * revision but not the one built on it, which would then read as the page's
+ * head. Everything newer than the cut second is complete.
+ */
+function withoutOldestSecond(events: readonly RelayEvent[]): RelayEvent[] {
+  let oldest = Number.POSITIVE_INFINITY;
+  for (const event of events) {
+    if (event.created_at < oldest) oldest = event.created_at;
+  }
+  const complete = events.filter((event) => event.created_at > oldest);
+  // A window that is one dense second has nothing newer to keep; list what was
+  // read (flagged truncated) rather than claim the relay has no pages.
+  return complete.length > 0 ? complete : [...events];
+}
+
+/**
  * Read the Space library: the newest revisions across every channel the viewer
  * can read, grouped into pages. The filter carries no `#h`, so the relay scopes
  * it to the viewer's accessible channels exactly as it does the Home feed.
  *
- * A page's newest revision is newer than all its others, so any page with a
- * revision in the window has its true head in the window too.
+ * A page's head is never older than its other revisions, so any page with a
+ * revision in the window has its head in the window too, except that a window
+ * cut inside one second can hold only the older of two revisions made in that
+ * second (NIP-PG rule 9). Such a window drops its oldest second before pages
+ * are built.
  */
 export async function fetchPagesLibrary(
   fetchEvents: FetchEvents,
@@ -118,8 +144,9 @@ export async function fetchPagesLibrary(
     { kinds: [KIND_PAGE_REVISION] },
     paging,
   );
+  const readable = truncated ? withoutOldestSecond(events) : events;
   return {
-    pages: buildLibrary(parsePageEvents(events).revisions),
+    pages: buildLibrary(parsePageEvents(readable).revisions),
     truncated,
   };
 }
@@ -127,28 +154,59 @@ export async function fetchPagesLibrary(
 export type PageDetailResult = {
   /** `null` when the page has no readable revision. */
   detail: PageDetail | null;
-  /** Older history or suggestions may be missing; the head is always current. */
+  /**
+   * The revision read hit its bound: older revisions may be missing from the
+   * history. The head is always current.
+   */
   truncated: boolean;
+  /**
+   * The suggestion/resolution read hit its bound: older suggestions, or the
+   * resolutions that closed them, may be missing, so the pending list is not
+   * exhaustive.
+   */
+  suggestionsTruncated: boolean;
 };
 
 /**
  * Read one page: revisions, suggestions and resolutions for exactly its
  * `(h, d)`. NIP-PG requires the relay to answer `#h` + `#d` queries exactly, so
  * a quiet page's history is complete even in a busy channel.
+ *
+ * Revisions are read on their own so that suggestions and resolutions (newer
+ * than the head, and unbounded in number) can never fill the window and push
+ * the head out of it. Either read failing fails the whole call: a missing
+ * suggestion read must not look like "no suggestions".
  */
 export async function fetchPageDetail(
   fetchEvents: FetchEvents,
   identity: PageIdentity,
   paging?: PagingOptions,
 ): Promise<PageDetailResult> {
-  const { events, truncated } = await fetchEventsPaged(
-    fetchEvents,
-    {
-      kinds: [...PAGE_EVENT_KINDS],
-      "#h": [identity.channelId],
-      "#d": [identity.pageId],
-    },
-    paging,
-  );
-  return { detail: buildPageDetail(identity, events), truncated };
+  const scope = {
+    "#h": [identity.channelId],
+    "#d": [identity.pageId],
+  };
+  const [revisions, activity] = await Promise.all([
+    fetchEventsPaged(
+      fetchEvents,
+      { kinds: [KIND_PAGE_REVISION], ...scope },
+      paging,
+    ),
+    fetchEventsPaged(
+      fetchEvents,
+      {
+        kinds: [KIND_PAGE_SUGGESTION, KIND_PAGE_SUGGESTION_RESOLUTION],
+        ...scope,
+      },
+      paging,
+    ),
+  ]);
+  return {
+    detail: buildPageDetail(identity, [
+      ...revisions.events,
+      ...activity.events,
+    ]),
+    truncated: revisions.truncated,
+    suggestionsTruncated: activity.truncated,
+  };
 }

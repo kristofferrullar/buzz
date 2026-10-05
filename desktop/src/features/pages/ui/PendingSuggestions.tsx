@@ -8,6 +8,8 @@ import type { AuthorLabeler } from "../types";
 type PendingSuggestionsProps = {
   authorLabel: AuthorLabeler;
   suggestions: readonly SuggestionState[];
+  /** The suggestion read stopped at its bound: the list may omit older ones. */
+  truncated?: boolean;
 };
 
 /**
@@ -19,6 +21,7 @@ type PendingSuggestionsProps = {
 export function PendingSuggestions({
   authorLabel,
   suggestions,
+  truncated = false,
 }: PendingSuggestionsProps) {
   const headingId = React.useId();
   const pending = suggestions.filter((state) => state.closed === null);
@@ -76,6 +79,14 @@ export function PendingSuggestions({
           ))}
         </ul>
       )}
+      {truncated ? (
+        <p
+          className="text-sm text-muted-foreground"
+          data-testid="page-suggestions-truncated"
+        >
+          Older suggestions aren&rsquo;t shown.
+        </p>
+      ) : null}
     </section>
   );
 }
