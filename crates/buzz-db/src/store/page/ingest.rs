@@ -25,8 +25,8 @@ use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use super::{
-    canonical_uuid, lowercase_hex_32, reproject_page_in_transaction, PageRecord, PageRevisionError,
-    TAG_CHANNEL,
+    canonical_uuid, load_revisions, lowercase_hex_32, reproject_page_in_transaction, resolve_page,
+    row_to_record, PageRecord, PageRevisionError, PageRevisionMeta, TAG_CHANNEL,
 };
 use crate::error::{DbError, Result};
 
@@ -261,6 +261,68 @@ pub async fn insert_page_event_in_transaction(
         crate::insert_mentions_in_transaction(tx, community, event, Some(channel_id)).await?;
     }
     Ok((stored, inserted))
+}
+
+/// After a first revision created a page's row, make the row equal to what a replay
+/// of the page computes when the page already has stored history.
+///
+/// Deleting a page's last live revision removes its row but keeps the deleted
+/// events, and the page id can then be created anew. A replay counts every stored
+/// revision (deleted ones included) and takes the creator and creation time from
+/// the earliest root, so a plain create (count 1, the new revision as creator) would
+/// disagree with it the first time anything re-projects the page (NIP-PG "Rebuild
+/// Invariant"). The caller holds the page writer lock and has just created the row
+/// with [`super::create_page_head_in_transaction`]; a page with no stored history is
+/// left alone, and so is a row a replay would not choose this revision as head for
+/// (the replay would drop that page, so there is nothing to align to). Returns the
+/// aligned row, `None` when nothing changed.
+pub async fn align_recreated_page_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    revision: &PageRevisionMeta,
+) -> Result<Option<PageRecord>> {
+    let has_history: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM events WHERE community_id = $1 AND kind = $2 \
+           AND channel_id = $3 AND d_tag = $4 AND id <> $5)",
+    )
+    .bind(community.as_uuid())
+    .bind(KIND_PAGE_REVISION as i32)
+    .bind(revision.channel_id)
+    .bind(revision.page_id.to_string())
+    .bind(revision.event_id.as_slice())
+    .fetch_one(tx.as_mut())
+    .await?;
+    if !has_history {
+        return Ok(None);
+    }
+    let (revisions, _) = load_revisions(
+        tx.as_mut(),
+        community,
+        revision.channel_id,
+        revision.page_id,
+    )
+    .await?;
+    let Some(resolved) = resolve_page(&revisions) else {
+        return Ok(None);
+    };
+    if resolved.head.event_id != revision.event_id {
+        return Ok(None);
+    }
+    let row = sqlx::query(concat!(
+        "UPDATE pages SET created_by = $4, created_at = $5, revision_count = $6 \
+         WHERE community_id = $1 AND channel_id = $2 AND page_id = $3 AND deleted_at IS NULL \
+         RETURNING ",
+        page_columns!()
+    ))
+    .bind(community.as_uuid())
+    .bind(revision.channel_id)
+    .bind(revision.page_id)
+    .bind(resolved.created_by.as_slice())
+    .bind(resolved.created_at)
+    .bind(resolved.revision_count)
+    .fetch_optional(tx.as_mut())
+    .await?;
+    row.as_ref().map(row_to_record).transpose()
 }
 
 /// What [`soft_delete_page_event_in_transaction`] did.
