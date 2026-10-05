@@ -29,7 +29,7 @@ use buzz_db::DbError;
 use nostr::Event;
 use uuid::Uuid;
 
-use super::ingest::IngestError;
+use super::ingest::{check_channel_membership, IngestError};
 use crate::state::AppState;
 
 /// Channel tag. Defined by NIP-29; shared by every page event.
@@ -281,6 +281,69 @@ pub(crate) fn check_reference(
     Ok(())
 }
 
+/// Why a page event was refused while it was being validated.
+#[derive(Debug)]
+enum Refusal {
+    /// The final answer.
+    Ingest(IngestError),
+    /// A reference to an event outside the event's channel. `shown` describes the
+    /// event and is only for a caller who can read `channel`; everyone else gets
+    /// `hidden`, the answer for an id that was never stored. Without that, the
+    /// message would tell any open-channel writer which ids exist in channels they
+    /// cannot read (a revision of a private page, a private chat message).
+    Foreign {
+        channel: Option<Uuid>,
+        shown: String,
+        hidden: String,
+    },
+}
+
+impl From<IngestError> for Refusal {
+    fn from(error: IngestError) -> Self {
+        Self::Ingest(error)
+    }
+}
+
+/// A final client rejection.
+fn reject(message: impl Into<String>) -> Refusal {
+    Refusal::Ingest(IngestError::Rejected(message.into()))
+}
+
+/// The rejection for a reference that names no event the caller may know about.
+fn missing_reference(tag: &str) -> String {
+    if tag == TAG_PREV {
+        "conflict: prev revision not found".to_owned()
+    } else {
+        format!("invalid: {tag} event not found")
+    }
+}
+
+/// [`check_reference`], with a failure on an event outside `channel_id` marked
+/// [`Refusal::Foreign`] so the caller's access to that channel decides how much of
+/// it is described.
+fn check_scoped_reference(
+    reference: &PageEventRecord,
+    tag: &str,
+    expected_kind: u32,
+    channel_id: Uuid,
+    page_id: Uuid,
+) -> Result<(), Refusal> {
+    match check_reference(reference, tag, expected_kind, channel_id, page_id) {
+        Ok(()) => Ok(()),
+        Err(shown) if reference.channel_id != Some(channel_id) => Err(Refusal::Foreign {
+            channel: reference.channel_id,
+            shown,
+            hidden: missing_reference(tag),
+        }),
+        Err(shown) => Err(Refusal::Ingest(IngestError::Rejected(shown))),
+    }
+}
+
+/// Whether a scoped token (`None`: an unscoped session) reaches `channel`.
+fn token_allows(token_channels: Option<&[Uuid]>, channel: Uuid) -> bool {
+    token_channels.is_none_or(|allowed| allowed.contains(&channel))
+}
+
 // -- Storing -----------------------------------------------------------------
 
 /// Map a database failure: a lock wait that timed out is retryable
@@ -321,7 +384,7 @@ async fn load_reference(
     page::load_event_in_transaction(tx, community, id)
         .await
         .map_err(db_error)?
-        .ok_or_else(|| IngestError::Rejected(format!("invalid: {tag} event not found")))
+        .ok_or_else(|| IngestError::Rejected(missing_reference(tag)))
 }
 
 /// Validate a page event against stored pages and store it atomically.
@@ -336,12 +399,45 @@ pub(crate) async fn store_page_event(
     state: &AppState,
     event: &Event,
     channel_id: Uuid,
+    token_channels: Option<&[Uuid]>,
 ) -> Result<(StoredEvent, bool), IngestError> {
+    match store_in_transaction(tenant, state, event, channel_id).await {
+        Ok(stored) => Ok(stored),
+        Err(Refusal::Ingest(error)) => Err(error),
+        Err(Refusal::Foreign {
+            channel,
+            shown,
+            hidden,
+        }) => {
+            // The transaction ended with the call above, so this lookup holds no
+            // second pool connection. The author may be told about an event in a
+            // channel they can read (and a scoped token may reach); anything else
+            // looks like a missing id.
+            let readable = match channel {
+                Some(other) if token_allows(token_channels, other) => {
+                    check_channel_membership(tenant, state, other, &event.pubkey.to_bytes(), None)
+                        .await
+                        .is_ok()
+                }
+                _ => false,
+            };
+            Err(IngestError::Rejected(if readable { shown } else { hidden }))
+        }
+    }
+}
+
+async fn store_in_transaction(
+    tenant: &TenantContext,
+    state: &AppState,
+    event: &Event,
+    channel_id: Uuid,
+) -> Result<(StoredEvent, bool), Refusal> {
     let parsed = parse_page_event(event).map_err(IngestError::Rejected)?;
     if parsed.channel_id != channel_id {
         return Err(IngestError::Rejected(
             "invalid: page h tag does not match the event channel".to_owned(),
-        ));
+        )
+        .into());
     }
     let community = tenant.community();
     let page_id = parsed.page_id;
@@ -362,11 +458,11 @@ pub(crate) async fn store_page_event(
     {
         Ok(()) => {}
         Err(DbError::AccessDenied(reason)) => {
-            return Err(IngestError::Rejected(format!(
+            return Err(reject(format!(
                 "restricted: community writes are fenced: {reason}"
             )))
         }
-        Err(error) => return Err(db_error(error)),
+        Err(error) => return Err(db_error(error).into()),
     }
 
     // An event id we already hold is a retried submission: answer it as a
@@ -383,21 +479,22 @@ pub(crate) async fn store_page_event(
     }
 
     let mut head_move: Option<&PageRevisionMeta> = None;
+    let mut no_op = false;
     match &parsed.body {
         PageBody::Revision { meta, suggestion } => {
-            validate_revision(&mut tx, community, event, &parsed, meta, *suggestion).await?;
+            no_op =
+                validate_revision(&mut tx, community, event, &parsed, meta, *suggestion).await?;
             head_move = Some(meta);
         }
         PageBody::Suggestion { base } => {
             let base_event = load_reference(&mut tx, community, TAG_BASE, base).await?;
-            check_reference(
+            check_scoped_reference(
                 &base_event,
                 TAG_BASE,
                 KIND_PAGE_REVISION,
                 channel_id,
                 page_id,
-            )
-            .map_err(IngestError::Rejected)?;
+            )?;
         }
         PageBody::Resolution {
             suggestion,
@@ -418,6 +515,21 @@ pub(crate) async fn store_page_event(
         page::record_page_revision_in_transaction(&mut tx, community, meta)
             .await
             .map_err(|error| head_error(error, meta.prev))?;
+        // NIP-PG rule 4 compares with the head. `prev` equals the head only once
+        // the swap above has held, so a stale `prev` whose content merely equals
+        // its own is the retryable `conflict:` it is, not a no-op.
+        if no_op {
+            return Err(reject(
+                "invalid: no-op revision (title and content equal the page head)",
+            ));
+        }
+        if meta.prev.is_none() {
+            // A page id created anew after its last live revision was deleted
+            // keeps its deleted history: its row must read like a replay of it.
+            page::align_recreated_page_in_transaction(&mut tx, community, meta)
+                .await
+                .map_err(db_error)?;
+        }
     }
     tx.commit().await.map_err(|error| db_error(error.into()))?;
     Ok((stored, true))
@@ -430,37 +542,32 @@ async fn validate_revision(
     parsed: &ParsedPageEvent,
     meta: &PageRevisionMeta,
     suggestion: Option<[u8; 32]>,
-) -> Result<(), IngestError> {
+) -> Result<bool, Refusal> {
     let Some(prev) = meta.prev else {
         // A first revision is decided by the head index: it conflicts if the
         // page already exists.
-        return Ok(());
+        return Ok(false);
     };
     let (channel_id, page_id) = (parsed.channel_id, parsed.page_id);
-    let prev_event = page::load_event_in_transaction(tx, community, &prev)
-        .await
-        .map_err(db_error)?
-        .ok_or_else(|| IngestError::Rejected("conflict: prev revision not found".to_owned()))?;
-    check_reference(
+    let prev_event = load_reference(tx, community, TAG_PREV, &prev).await?;
+    check_scoped_reference(
         &prev_event,
         TAG_PREV,
         KIND_PAGE_REVISION,
         channel_id,
         page_id,
-    )
-    .map_err(IngestError::Rejected)?;
+    )?;
 
     if let Some(suggestion_id) = suggestion {
         let suggestion_event =
             load_reference(tx, community, TAG_SUGGESTION, &suggestion_id).await?;
-        check_reference(
+        check_scoped_reference(
             &suggestion_event,
             TAG_SUGGESTION,
             KIND_PAGE_SUGGESTION,
             channel_id,
             page_id,
-        )
-        .map_err(IngestError::Rejected)?;
+        )?;
         let state = page::suggestion_state_in_transaction(
             tx,
             community,
@@ -471,30 +578,22 @@ async fn validate_revision(
         .await
         .map_err(db_error)?;
         if state.is_closed() {
-            return Err(IngestError::Rejected(
-                "conflict: suggestion is already closed".to_owned(),
-            ));
+            return Err(reject("conflict: suggestion is already closed"));
         }
         let base = suggestion_event
             .tag_value(TAG_BASE)
             .and_then(|value| page::parse_page_event_id(TAG_BASE, value).ok());
         if base != Some(prev) {
-            return Err(IngestError::Rejected(
-                "conflict: suggestion is stale (its base is not the revision's prev)".to_owned(),
+            return Err(reject(
+                "conflict: suggestion is stale (its base is not the revision's prev)",
             ));
         }
     }
 
-    // NIP-PG rule 4. Compared with `prev`, which the head index then requires to
-    // be the head, so this is a comparison with the head.
-    if prev_event.tag_value(TAG_TITLE) == Some(meta.title.as_str())
-        && prev_event.content == event.content
-    {
-        return Err(IngestError::Rejected(
-            "invalid: no-op revision (title and content equal the page head)".to_owned(),
-        ));
-    }
-    Ok(())
+    // NIP-PG rule 4. Equal to `prev`, which the head swap then requires to be the
+    // head; the caller rejects it once that swap has held.
+    Ok(prev_event.tag_value(TAG_TITLE) == Some(meta.title.as_str())
+        && prev_event.content == event.content)
 }
 
 async fn validate_resolution(
@@ -504,50 +603,44 @@ async fn validate_resolution(
     parsed: &ParsedPageEvent,
     suggestion: &[u8; 32],
     outcome: Outcome,
-) -> Result<(), IngestError> {
+) -> Result<(), Refusal> {
     let (channel_id, page_id) = (parsed.channel_id, parsed.page_id);
     let suggestion_event = load_reference(tx, community, TAG_EVENT, suggestion).await?;
-    check_reference(
+    check_scoped_reference(
         &suggestion_event,
         TAG_EVENT,
         KIND_PAGE_SUGGESTION,
         channel_id,
         page_id,
-    )
-    .map_err(IngestError::Rejected)?;
+    )?;
     let state =
         page::suggestion_state_in_transaction(tx, community, channel_id, page_id, suggestion)
             .await
             .map_err(db_error)?;
     if state.resolved {
-        return Err(IngestError::Rejected(
-            "conflict: suggestion is already resolved".to_owned(),
-        ));
+        return Err(reject("conflict: suggestion is already resolved"));
     }
     match outcome {
-        Outcome::Rejected if state.applied => Err(IngestError::Rejected(
-            "conflict: suggestion is already applied".to_owned(),
-        )),
+        Outcome::Rejected if state.applied => {
+            Err(reject("conflict: suggestion is already applied"))
+        }
         Outcome::Rejected => Ok(()),
         Outcome::Accepted { rev } => {
             let rev_event = load_reference(tx, community, TAG_REV, &rev).await?;
-            check_reference(&rev_event, TAG_REV, KIND_PAGE_REVISION, channel_id, page_id)
-                .map_err(IngestError::Rejected)?;
+            check_scoped_reference(&rev_event, TAG_REV, KIND_PAGE_REVISION, channel_id, page_id)?;
             if rev_event.author != event.pubkey.to_bytes() {
-                return Err(IngestError::Rejected(
-                    "invalid: rev must be a revision published by the resolver".to_owned(),
+                return Err(reject(
+                    "invalid: rev must be a revision published by the resolver",
                 ));
             }
             let applies = rev_event.tag_value(TAG_SUGGESTION);
             let suggestion_hex = hex::encode(suggestion);
             if applies.is_some_and(|value| value != suggestion_hex) {
-                return Err(IngestError::Rejected(
-                    "invalid: rev applies a different suggestion".to_owned(),
-                ));
+                return Err(reject("invalid: rev applies a different suggestion"));
             }
             if state.applied && applies.is_none() {
-                return Err(IngestError::Rejected(
-                    "conflict: suggestion is already applied by another revision".to_owned(),
+                return Err(reject(
+                    "conflict: suggestion is already applied by another revision",
                 ));
             }
             Ok(())
