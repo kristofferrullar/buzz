@@ -7,7 +7,9 @@
  * Space therefore subscribe per channel, in chunks the relay accepts.
  */
 import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
-import { PAGE_EVENT_KINDS } from "./pageModel";
+import type { RelayEvent } from "@/shared/api/types";
+import { KIND_PAGE_REVISION } from "@/shared/constants/kinds";
+import { PAGE_EVENT_KINDS, type PageIdentity } from "./pageModel";
 
 /** `#h` values per live REQ. The relay refuses a REQ naming more than 128. */
 export const PAGE_LIVE_CHANNELS_PER_REQ = 100;
@@ -44,4 +46,38 @@ export function buildPageLiveFilters(
     });
   }
   return filters;
+}
+
+/**
+ * What a burst of live page events obliges the client to re-read. The library
+ * lists page heads, so only a revision changes it; a page view only changes for
+ * events of its own `(h, d)`. Refetching everything on every event would make
+ * each edit anywhere re-download the whole library window.
+ */
+export type PageRefresh = {
+  /** A revision arrived: the library's heads may have changed. */
+  library: boolean;
+  /** Pages (by `(h, d)`) that got an event, keyed to dedupe a burst. */
+  pages: Map<string, PageIdentity>;
+  /** An event could not be attributed to a page: refresh everything. */
+  everything: boolean;
+};
+
+export function emptyPageRefresh(): PageRefresh {
+  return { library: false, pages: new Map(), everything: false };
+}
+
+/** Fold one live event into the pending refresh. */
+export function notePageEvent(refresh: PageRefresh, event: RelayEvent): void {
+  if (event.kind === KIND_PAGE_REVISION) refresh.library = true;
+  const channelId = event.tags.find((tag) => tag[0] === "h")?.[1];
+  const pageId = event.tags.find((tag) => tag[0] === "d")?.[1];
+  if (!channelId || !pageId) {
+    refresh.everything = true;
+    return;
+  }
+  refresh.pages.set(JSON.stringify([channelId, pageId]), {
+    channelId,
+    pageId,
+  });
 }

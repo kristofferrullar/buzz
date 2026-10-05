@@ -3,6 +3,7 @@ import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
+import type { RelayEvent } from "@/shared/api/types";
 import { createTrailingDebounce } from "@/shared/lib/trailingDebounce";
 import {
   fetchPageDetail,
@@ -11,7 +12,11 @@ import {
   type PageDetailResult,
   type PagesLibrary,
 } from "./lib/pageFetch";
-import { buildPageLiveFilters } from "./lib/pageLive";
+import {
+  buildPageLiveFilters,
+  emptyPageRefresh,
+  notePageEvent,
+} from "./lib/pageLive";
 
 /**
  * Query keys for pages, always scoped by community. The app also remounts its
@@ -84,7 +89,8 @@ export function usePageQuery(
  * remain the single source of truth for *what* the pages now are. Three
  * triggers invalidate them:
  *
- * - a live page event (debounced, so a burst is one refetch);
+ * - a live page event (debounced, so a burst is one refetch of just what it can
+ *   have changed: the library for a revision, the event's own page view);
  * - a live REQ becoming ready, which closes the gap between a one-shot history
  *   read and the subscription starting: anything published before the
  *   subscription registered is in the refetch, anything after arrives live;
@@ -116,14 +122,37 @@ export function usePagesLiveUpdates(
         queryKey: pagesQueryKeys.all(communityId),
       });
     };
-    const debounced = createTrailingDebounce(
-      invalidate,
-      LIVE_REFRESH_DEBOUNCE_MS,
-    );
+    // A burst of live events collapses into one flush that re-reads only what
+    // the events can have changed (see `PageRefresh`).
+    let pending = emptyPageRefresh();
+    const flush = () => {
+      const refresh = pending;
+      pending = emptyPageRefresh();
+      if (refresh.everything) {
+        invalidate();
+        return;
+      }
+      if (disposed) return;
+      if (refresh.library) {
+        void queryClient.invalidateQueries({
+          queryKey: pagesQueryKeys.library(communityId),
+        });
+      }
+      for (const { channelId, pageId } of refresh.pages.values()) {
+        void queryClient.invalidateQueries({
+          queryKey: pagesQueryKeys.page(communityId, channelId, pageId),
+        });
+      }
+    };
+    const debounced = createTrailingDebounce(flush, LIVE_REFRESH_DEBOUNCE_MS);
+    const onLiveEvent = (event: RelayEvent) => {
+      notePageEvent(pending, event);
+      debounced.trigger();
+    };
 
     for (const filter of filters) {
       relayClient
-        .subscribeLive(filter, debounced.trigger, invalidate)
+        .subscribeLive(filter, onLiveEvent, invalidate)
         .then((dispose) => {
           if (disposed) void dispose();
           else disposers.push(dispose);
