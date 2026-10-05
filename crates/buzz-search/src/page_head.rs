@@ -75,10 +75,12 @@ pub(crate) fn push_page_kind_exclusion(qb: &mut QueryBuilder<Postgres>) {
 /// source is aliased `events`, so [`push_event_filters`] applies unchanged and
 /// the arm's shape mirrors the generic one (`search_tsv @@ query` against a
 /// GIN-indexed vector). The vector is the page's own (`pages.search_tsv`); the
-/// head event is joined only to produce the hit's columns, and the join
-/// requires it to be a live `PAGE_REVISION` in the page's own channel, so a
-/// damaged index row cannot surface a suggestion, a deleted event or another
-/// channel's event. Community is part of both the page predicate and the join.
+/// head event is joined only to produce the hit's columns, and the arm
+/// requires it to be a live `PAGE_REVISION` in the page's own channel (the
+/// derived table exposes the event's `deleted_at`, which the shared
+/// `deleted_at IS NULL` below applies), so a damaged index row cannot surface a
+/// suggestion, a deleted event or another channel's event. Community is part of
+/// the page predicate, the join and the event predicate.
 ///
 /// The join also pins `events.created_at` to `pages.updated_at`: NIP-PG's
 /// rebuild invariant stores the head event's own timestamp there, and the
@@ -107,7 +109,7 @@ pub(crate) fn push_page_head_arm(
                WHERE p.community_id = ",
     );
     qb.push_bind(*query.community.as_uuid());
-    qb.push(" AND p.deleted_at IS NULL AND e.deleted_at IS NULL AND e.kind = ");
+    qb.push(" AND p.deleted_at IS NULL AND e.kind = ");
     qb.push_bind(KIND_PAGE_REVISION as i32);
     qb.push(") AS events CROSS JOIN LATERAL (SELECT ");
     push_tsquery(qb, query.mode, search_text);
