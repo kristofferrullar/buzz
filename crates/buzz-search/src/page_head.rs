@@ -5,20 +5,20 @@
 //! by how the database was built: a database created by the migrations carries
 //! the positive allowlist of migration 0008 (page kinds are NOT indexed), while
 //! one built from `schema/schema.sql` or upgraded in place carries the negative
-//! exclusion list (page kinds ARE indexed, every revision, suggestion and
-//! resolution of them). This crate cannot change that column (fork rule 1), so
-//! page awareness lives in the query and must hold under both policies:
+//! exclusion list (page kinds ARE indexed: every revision, suggestion and
+//! resolution). This crate cannot change that column (fork rule 1), and no
+//! policy over `events` can express "head revisions only", so page awareness
+//! lives in the query plus one projection on the fork's own `pages` table:
 //!
 //! 1. The generic `events` arm excludes every page kind
 //!    ([`push_page_kind_exclusion`]). Superseded revisions, suggestions and
 //!    resolutions can therefore never match, whatever the column holds.
 //! 2. A page-head arm ([`push_page_head_arm`]), `UNION ALL`ed onto the generic
-//!    arm, finds pages through the `pages` index: one row per live page naming
-//!    its head revision. It matches `COALESCE(search_tsv, to_tsvector('simple',
-//!    content))`: the stored vector when the policy indexes page kinds, the same
-//!    expression computed on the fly when it does not. The arm is driven from
-//!    `pages`, so its cost scales with the number of live pages in scope, never
-//!    with the number of revisions or events.
+//!    arm, matches `pages.search_tsv`: the title and content of each live page's
+//!    head revision, maintained by a trigger on the head columns (fork-private
+//!    migration `9002_pages_search.sql`) and GIN-indexed. Its cost scales with
+//!    the matching pages, not with revisions or events, and it behaves the same
+//!    under either FTS policy.
 //!
 //! The head arm is opt-in: it runs only when the query names
 //! `KIND_PAGE_REVISION` in `kinds`. A kindless search keeps returning the
@@ -71,13 +71,14 @@ pub(crate) fn push_page_kind_exclusion(qb: &mut QueryBuilder<Postgres>) {
 /// Append the page-head arm (`UNION ALL SELECT ...`) when the query asks for
 /// pages; otherwise push nothing.
 ///
-/// The arm selects the same seven columns as the generic arm. Its row source
-/// is aliased `events`, so [`push_event_filters`] applies unchanged. The join
-/// keeps the head's `created_at` equal to `pages.updated_at` (the rebuild
-/// invariant: the index stores the head event's own timestamp), which lets
-/// Postgres prune to one partition of `events` per page, and requires the head
-/// to be a live `PAGE_REVISION` in the page's own channel, so a damaged index
-/// row cannot surface a suggestion, a deleted event or another channel's event.
+/// The arm selects the same seven columns as the generic arm and its row
+/// source is aliased `events`, so [`push_event_filters`] applies unchanged and
+/// the arm's shape mirrors the generic one (`search_tsv @@ query` against a
+/// GIN-indexed vector). The vector is the page's own (`pages.search_tsv`); the
+/// head event is joined only to produce the hit's columns, and the join
+/// requires it to be a live `PAGE_REVISION` in the page's own channel, so a
+/// damaged index row cannot surface a suggestion, a deleted event or another
+/// channel's event. Community is part of both the page predicate and the join.
 pub(crate) fn push_page_head_arm(
     qb: &mut QueryBuilder<Postgres>,
     query: &SearchQuery,
@@ -89,27 +90,23 @@ pub(crate) fn push_page_head_arm(
     qb.push(
         " UNION ALL SELECT id, kind, pubkey, channel_id, created_at, \
          EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s, \
-         ts_rank_cd(head_tsv.tsv, search_query.query) AS rank \
-         FROM (SELECT e.* FROM pages p JOIN events e \
-           ON e.community_id = p.community_id \
-          AND e.id = p.head_event_id \
-          AND e.created_at = p.updated_at \
-          AND e.channel_id = p.channel_id \
-         WHERE p.community_id = ",
+         ts_rank_cd(search_tsv, search_query.query) AS rank \
+         FROM (SELECT e.id, e.community_id, e.kind, e.pubkey, e.channel_id, \
+                      e.created_at, e.deleted_at, p.search_tsv \
+               FROM pages p JOIN events e \
+                 ON e.community_id = p.community_id \
+                AND e.id = p.head_event_id \
+                AND e.channel_id = p.channel_id \
+               WHERE p.community_id = ",
     );
     qb.push_bind(*query.community.as_uuid());
     qb.push(" AND p.deleted_at IS NULL AND e.deleted_at IS NULL AND e.kind = ");
     qb.push_bind(KIND_PAGE_REVISION as i32);
-    qb.push(
-        ") AS events \
-         CROSS JOIN LATERAL (SELECT COALESCE(events.search_tsv, \
-           to_tsvector('simple', events.content)) AS tsv) AS head_tsv \
-         CROSS JOIN LATERAL (SELECT ",
-    );
+    qb.push(") AS events CROSS JOIN LATERAL (SELECT ");
     push_tsquery(qb, query.mode, search_text);
     qb.push(" AS query) AS search_query WHERE community_id = ");
     qb.push_bind(*query.community.as_uuid());
-    qb.push(" AND deleted_at IS NULL AND head_tsv.tsv @@ search_query.query");
+    qb.push(" AND deleted_at IS NULL AND search_tsv @@ search_query.query");
     push_event_filters(qb, query);
 }
 

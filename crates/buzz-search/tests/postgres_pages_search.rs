@@ -46,6 +46,7 @@ const MIGRATION_0014_SQL: &str = include_str!("../../../migrations/0014_push_lea
 const MIGRATION_0033_SQL: &str =
     include_str!("../../../migrations/0033_private_managed_agent_fts.sql");
 const MIGRATION_9001_SQL: &str = include_str!("../../../migrations/9001_pages_index.sql");
+const MIGRATION_9002_SQL: &str = include_str!("../../../migrations/9002_pages_search.sql");
 
 /// `schema/schema.sql`'s `search_tsv` expression, installed over the
 /// allowlist to model a database that indexes every kind not excluded.
@@ -122,6 +123,9 @@ async fn setup(policy: FtsPolicy) -> (PgPool, String) {
     pool.execute(MIGRATION_9001_SQL)
         .await
         .expect("apply 9001 pages migration");
+    pool.execute(MIGRATION_9002_SQL)
+        .await
+        .expect("apply 9002 page search migration");
     if policy == FtsPolicy::ExclusionList {
         pool.execute(EXCLUSION_LIST_FTS_SQL)
             .await
@@ -248,6 +252,18 @@ impl Page {
     /// Store a revision event at `created_at` and make it the page head, exactly
     /// as an accepted `PAGE_REVISION` does (event insert + head upsert).
     async fn revise(&mut self, pool: &PgPool, content: &str, created_at: i64) -> [u8; 32] {
+        self.revise_titled(pool, "Page title", content, created_at)
+            .await
+    }
+
+    /// [`Page::revise`] with an explicit title.
+    async fn revise_titled(
+        &mut self,
+        pool: &PgPool,
+        title: &str,
+        content: &str,
+        created_at: i64,
+    ) -> [u8; 32] {
         let id = rand_bytes32();
         insert_event(
             pool,
@@ -264,9 +280,10 @@ impl Page {
         sqlx::query(
             "INSERT INTO pages (community_id, channel_id, page_id, head_event_id, title, \
                  created_by, created_at, updated_by, updated_at) \
-             VALUES ($1, $2, $3, $4, 'Page title', $5, to_timestamp($6), $5, to_timestamp($6)) \
+             VALUES ($1, $2, $3, $4, $7, $5, to_timestamp($6), $5, to_timestamp($6)) \
              ON CONFLICT (community_id, channel_id, page_id) DO UPDATE SET \
                  head_event_id = EXCLUDED.head_event_id, \
+                 title = EXCLUDED.title, \
                  updated_by = EXCLUDED.updated_by, \
                  updated_at = EXCLUDED.updated_at, \
                  revision_count = pages.revision_count + 1",
@@ -277,6 +294,7 @@ impl Page {
         .bind(&id[..])
         .bind(&self.author[..])
         .bind(created_at)
+        .bind(title)
         .execute(pool)
         .await
         .expect("upsert page head");
@@ -320,6 +338,43 @@ impl Page {
         .await
         .expect("tombstone page");
     }
+}
+
+/// Insert a `pages` row WITHOUT the search trigger, carrying a vector the
+/// trigger would never produce. Models index damage (a stale or hand-edited
+/// row) so the query's own guards (community, channel, live revision) are
+/// tested independently of the projection that normally prevents it.
+async fn insert_damaged_page_row(
+    pool: &PgPool,
+    community: CommunityId,
+    channel: Uuid,
+    page_id: Uuid,
+    head: [u8; 32],
+    created_at: i64,
+    searchable_text: &str,
+) {
+    pool.execute("ALTER TABLE pages DISABLE TRIGGER pages_search_tsv")
+        .await
+        .expect("disable search trigger");
+    sqlx::query(
+        "INSERT INTO pages (community_id, channel_id, page_id, head_event_id, title, \
+             created_by, created_at, updated_by, updated_at, search_tsv) \
+         VALUES ($1, $2, $3, $4, 't', $5, to_timestamp($6), $5, to_timestamp($6), \
+                 to_tsvector('simple', $7))",
+    )
+    .bind(community.as_uuid())
+    .bind(channel)
+    .bind(page_id)
+    .bind(&head[..])
+    .bind(rand_bytes32().as_slice())
+    .bind(created_at)
+    .bind(searchable_text)
+    .execute(pool)
+    .await
+    .expect("insert damaged index row");
+    pool.execute("ALTER TABLE pages ENABLE TRIGGER pages_search_tsv")
+        .await
+        .expect("re-enable search trigger");
 }
 
 async fn soft_delete_event(pool: &PgPool, community: CommunityId, id: [u8; 32]) {
@@ -389,6 +444,16 @@ async fn fixture_spans_both_fts_policies() {
             policy == FtsPolicy::ExclusionList,
             "{policy:?}: unexpected generic-index coverage of page kinds"
         );
+        // ...while the page's own vector is policy-independent.
+        let page_indexed: bool = sqlx::query(
+            "SELECT search_tsv IS NOT NULL AS indexed FROM pages WHERE community_id = $1",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .expect("read page tsv")
+        .get("indexed");
+        assert!(page_indexed, "{policy:?}: pages.search_tsv must be set");
         teardown(pool, &schema).await;
     }
 }
@@ -494,6 +559,130 @@ fn head_is_the_pointer_not_the_newest_timestamp<'a>(
 #[ignore = "requires Postgres"]
 async fn head_means_the_index_pointer_not_the_newest_created_at() {
     under_each_policy(head_is_the_pointer_not_the_newest_timestamp).await;
+}
+
+fn the_head_title_is_searchable<'a>(
+    pool: &'a PgPool,
+    policy: FtsPolicy,
+) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+    Box::pin(async move {
+        let community = mk_community(pool, "title.example").await;
+        let channel = mk_channel(pool, community).await;
+        let mut page = Page::new(community, channel);
+        page.revise_titled(pool, "Oldtitleword", "body one", T0)
+            .await;
+        let head = page
+            .revise_titled(pool, "Quarterlyroadmap", "body two", T0 + 1)
+            .await;
+
+        let hits = run(pool, &query(community, "quarterlyroadmap", pages_kinds())).await;
+        assert_eq!(hit_ids(&hits), vec![head], "{policy:?}: head title matches");
+        assert!(
+            run(pool, &query(community, "oldtitleword", pages_kinds()))
+                .await
+                .is_empty(),
+            "{policy:?}: a superseded title must not match"
+        );
+    })
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn the_title_of_the_head_revision_is_searchable() {
+    under_each_policy(the_head_title_is_searchable).await;
+}
+
+fn the_projection_names_only_a_live_head_revision<'a>(
+    pool: &'a PgPool,
+    policy: FtsPolicy,
+) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+    Box::pin(async move {
+        let community = mk_community(pool, "projection.example").await;
+        let other = mk_community(pool, "projection-other.example").await;
+        let channel = mk_channel(pool, community).await;
+        let other_channel = mk_channel(pool, other).await;
+
+        async fn page_tsv_text(pool: &PgPool, page_id: Uuid) -> Option<String> {
+            sqlx::query("SELECT search_tsv::text AS t FROM pages WHERE page_id = $1")
+                .bind(page_id)
+                .fetch_one(pool)
+                .await
+                .expect("read page vector")
+                .get("t")
+        }
+        async fn plain_insert(
+            pool: &PgPool,
+            community: CommunityId,
+            channel: Uuid,
+            page_id: Uuid,
+            head: [u8; 32],
+        ) {
+            sqlx::query(
+                "INSERT INTO pages (community_id, channel_id, page_id, head_event_id, title, \
+                     created_by, created_at, updated_by, updated_at) \
+                 VALUES ($1, $2, $3, $4, 'Title', $5, to_timestamp($6), $5, to_timestamp($6))",
+            )
+            .bind(community.as_uuid())
+            .bind(channel)
+            .bind(page_id)
+            .bind(&head[..])
+            .bind(rand_bytes32().as_slice())
+            .bind(T0)
+            .execute(pool)
+            .await
+            .expect("insert page row");
+        }
+
+        // A live revision head: title (A) and content are projected.
+        let mut live = Page::new(community, channel);
+        live.revise_titled(pool, "Livetitle", "livebody", T0).await;
+        let text = page_tsv_text(pool, live.id).await.expect("vector set");
+        assert!(
+            text.contains("'livetitle':1A") && text.contains("'livebody'"),
+            "{policy:?}: {text}"
+        );
+
+        // A head that is a suggestion, in another community, missing, or
+        // deleted projects NOTHING (NULL never matches): the index fails closed.
+        let suggestion_page = Page::new(community, channel);
+        let suggestion = suggestion_page
+            .side_event(pool, KIND_PAGE_SUGGESTION, "suggestionbody", T0)
+            .await;
+        plain_insert(pool, community, channel, suggestion_page.id, suggestion).await;
+        assert_eq!(page_tsv_text(pool, suggestion_page.id).await, None);
+
+        let foreign_page = Page::new(other, other_channel);
+        let mut owner = Page::new(community, channel);
+        let foreign_head = owner.revise(pool, "foreignbody", T0).await;
+        plain_insert(pool, other, other_channel, foreign_page.id, foreign_head).await;
+        assert_eq!(page_tsv_text(pool, foreign_page.id).await, None);
+
+        let missing_page = Page::new(community, channel);
+        plain_insert(pool, community, channel, missing_page.id, rand_bytes32()).await;
+        assert_eq!(page_tsv_text(pool, missing_page.id).await, None);
+
+        let mut deleted = Page::new(community, channel);
+        let deleted_head = deleted.revise(pool, "deletedbody", T0).await;
+        soft_delete_event(pool, community, deleted_head).await;
+        deleted.revise(pool, "revivedbody", T0 + 1).await;
+        // Re-pointing the head re-projects: the new head's text replaces it.
+        let text = page_tsv_text(pool, deleted.id).await.expect("vector set");
+        assert!(text.contains("'revivedbody'") && !text.contains("deletedbody"));
+        // Pointing the head back at the deleted event projects nothing.
+        sqlx::query("UPDATE pages SET head_event_id = $1 WHERE page_id = $2")
+            .bind(&deleted_head[..])
+            .bind(deleted.id)
+            .execute(pool)
+            .await
+            .expect("point head at a deleted event");
+        assert_eq!(page_tsv_text(pool, deleted.id).await, None);
+    })
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn the_search_projection_names_only_a_live_head_revision() {
+    under_each_policy(the_projection_names_only_a_live_head_revision).await;
 }
 
 // -- Suggestions and resolutions ---------------------------------------------------
@@ -640,20 +829,16 @@ fn community_isolation<'a>(
         // surface A's content to B: the join carries the community on both
         // sides, not the event id alone.
         let chan_b2 = mk_channel(pool, b).await;
-        sqlx::query(
-            "INSERT INTO pages (community_id, channel_id, page_id, head_event_id, title, \
-                 created_by, created_at, updated_by, updated_at) \
-             VALUES ($1, $2, $3, $4, 't', $5, to_timestamp($6), $5, to_timestamp($6))",
+        insert_damaged_page_row(
+            pool,
+            b,
+            chan_b2,
+            Uuid::new_v4(),
+            head_a,
+            T0,
+            "isolatedtoken in a",
         )
-        .bind(b.as_uuid())
-        .bind(chan_b2)
-        .bind(Uuid::new_v4())
-        .bind(&head_a[..])
-        .bind(rand_bytes32().as_slice())
-        .bind(T0)
-        .execute(pool)
-        .await
-        .expect("insert cross-community index row");
+        .await;
         let hits_b = run(pool, &query(b, "isolatedtoken", pages_kinds())).await;
         assert_eq!(
             hit_ids(&hits_b),
@@ -770,20 +955,16 @@ fn damaged_index_rows_scenario<'a>(
         let suggestion = page2
             .side_event(pool, KIND_PAGE_SUGGESTION, "headissuggestion text", T0 + 1)
             .await;
-        sqlx::query(
-            "INSERT INTO pages (community_id, channel_id, page_id, head_event_id, title, \
-                 created_by, created_at, updated_by, updated_at) \
-             VALUES ($1, $2, $3, $4, 't', $5, to_timestamp($6), $5, to_timestamp($6))",
+        insert_damaged_page_row(
+            pool,
+            community,
+            chan_a,
+            page2.id,
+            suggestion,
+            T0 + 1,
+            "headissuggestion text",
         )
-        .bind(community.as_uuid())
-        .bind(chan_a)
-        .bind(page2.id)
-        .bind(&suggestion[..])
-        .bind(rand_bytes32().as_slice())
-        .bind(T0 + 1)
-        .execute(pool)
-        .await
-        .expect("insert index row naming a suggestion");
+        .await;
         let hits = run(
             pool,
             &query(

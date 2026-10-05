@@ -1237,6 +1237,10 @@ CREATE TABLE pages (
     updated_at      TIMESTAMPTZ NOT NULL,
     revision_count  INT NOT NULL DEFAULT 1 CHECK (revision_count >= 1),
     deleted_at      TIMESTAMPTZ,
+    -- Searchable text of the head revision (fork-private migration 9002): the
+    -- title (weight A) and the head event's content, maintained by the trigger
+    -- below. NIP-PG "Search" matches pages only through this column.
+    search_tsv      TSVECTOR,
     PRIMARY KEY (community_id, channel_id, page_id),
     FOREIGN KEY (community_id, channel_id) REFERENCES channels (community_id, id)
 );
@@ -1244,6 +1248,31 @@ CREATE TABLE pages (
 CREATE INDEX idx_pages_library
     ON pages (community_id, updated_at DESC, channel_id DESC, page_id DESC)
     WHERE deleted_at IS NULL;
+
+CREATE INDEX idx_pages_search_tsv ON pages USING GIN (search_tsv);
+
+-- Page search projection (migrations/9002_pages_search.sql): a NULL vector
+-- (head event missing, deleted or not a revision) never matches.
+CREATE FUNCTION pages_refresh_search_tsv() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.search_tsv := (
+        SELECT setweight(to_tsvector('simple', NEW.title), 'A')
+               || to_tsvector('simple', e.content)
+          FROM events e
+         WHERE e.community_id = NEW.community_id
+           AND e.id = NEW.head_event_id
+           AND e.kind = 52000
+           AND e.deleted_at IS NULL
+         LIMIT 1
+    );
+    RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER pages_search_tsv
+    BEFORE INSERT OR UPDATE OF head_event_id, title ON pages
+    FOR EACH ROW EXECUTE FUNCTION pages_refresh_search_tsv();
 
 -- ── Whole-community deletion control plane (migration 0029) ─────────────────
 CREATE TABLE community_deletion_requests (
