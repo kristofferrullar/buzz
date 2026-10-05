@@ -269,6 +269,29 @@ async fn get_dedupes_duplicate_delivery() {
 }
 
 #[tokio::test]
+async fn get_rev_reaches_past_the_head_window_and_the_head_stays_the_newest_tip() {
+    let relay = fake_relay().await;
+    // Longer than the window the CLI reads to find the head.
+    let total = HEAD_WINDOW as u8 + 8;
+    relay.revision(1, None, 100, "T", "oldest");
+    for n in 2..=total {
+        relay.revision(n, Some(n - 1), 100 + u64::from(n), "T", "later");
+    }
+    let out = cmd_get(&relay.client, PG, CH, Some(&id(1)), &OutputFormat::Json)
+        .await
+        .unwrap();
+    let got = parse(&out);
+    assert_eq!(
+        got["revision"],
+        id(1),
+        "fetched by id from outside the window"
+    );
+    assert_eq!(got["content"], "oldest");
+    assert_eq!(got["head"], id(total));
+    assert_eq!(got["is_head"], false);
+}
+
+#[tokio::test]
 async fn get_of_an_unknown_page_or_a_foreign_revision_is_not_found() {
     let relay = fake_relay().await;
     relay.revision(1, None, 100, "T", "v1");
