@@ -265,20 +265,27 @@ fn normalized_search_text(q: &str) -> Option<String> {
 ///
 /// SQL shape (always):
 /// ```sql
-/// SELECT id, kind, pubkey, channel_id, EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s,
+/// SELECT id, kind, pubkey, channel_id, created_at,
+///        EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s,
 ///        ts_rank_cd(search_tsv, query) AS rank
 /// FROM events,
 ///      <mode-specific tsquery> AS query
 /// WHERE community_id = $ctx
 ///   AND deleted_at IS NULL
 ///   AND search_tsv @@ query
+///   AND kind NOT IN (<page kinds>)
 ///   [+ channel scope, kinds, authors, since, until]
+///   [UNION ALL <page-head arm>, only when `kinds` names the page revision kind]
 /// ORDER BY rank DESC, created_at DESC, id
 /// LIMIT $per_page OFFSET (($page - 1) * $per_page)
 /// ```
 ///
+/// Page kinds never match through the generic arm; a page matches only through
+/// its head revision, in the page-head arm (the private `page_head` module).
+///
 /// `community_id = $ctx` is the first predicate and is non-negotiable. There
-/// is no code path through this function that omits it.
+/// is no code path through this function that omits it (the page-head arm
+/// carries it on both the page index and the head event).
 #[datastore_span(name = "search", system = "postgresql")]
 pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, SearchError> {
     let Some(search_text) = normalized_search_text(&query.q) else {
