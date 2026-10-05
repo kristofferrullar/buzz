@@ -79,6 +79,12 @@ pub(crate) fn push_page_kind_exclusion(qb: &mut QueryBuilder<Postgres>) {
 /// requires it to be a live `PAGE_REVISION` in the page's own channel, so a
 /// damaged index row cannot surface a suggestion, a deleted event or another
 /// channel's event. Community is part of both the page predicate and the join.
+///
+/// The join also pins `events.created_at` to `pages.updated_at`: NIP-PG's
+/// rebuild invariant stores the head event's own timestamp there, and the
+/// equality lets Postgres prune `events` to the one partition holding the head
+/// instead of probing every monthly partition per matching page. A row that
+/// breaks the invariant simply does not match (the failure is closed).
 pub(crate) fn push_page_head_arm(
     qb: &mut QueryBuilder<Postgres>,
     query: &SearchQuery,
@@ -96,6 +102,7 @@ pub(crate) fn push_page_head_arm(
                FROM pages p JOIN events e \
                  ON e.community_id = p.community_id \
                 AND e.id = p.head_event_id \
+                AND e.created_at = p.updated_at \
                 AND e.channel_id = p.channel_id \
                WHERE p.community_id = ",
     );

@@ -668,14 +668,34 @@ fn the_projection_names_only_a_live_head_revision<'a>(
         // Re-pointing the head re-projects: the new head's text replaces it.
         let text = page_tsv_text(pool, deleted.id).await.expect("vector set");
         assert!(text.contains("'revivedbody'") && !text.contains("deletedbody"));
-        // Pointing the head back at the deleted event projects nothing.
-        sqlx::query("UPDATE pages SET head_event_id = $1 WHERE page_id = $2")
-            .bind(&deleted_head[..])
-            .bind(deleted.id)
-            .execute(pool)
-            .await
-            .expect("point head at a deleted event");
+        // Pointing the head back at the deleted event (with its own timestamp,
+        // so only the deletion can explain the result) projects nothing.
+        sqlx::query(
+            "UPDATE pages SET head_event_id = $1, updated_at = to_timestamp($2) WHERE page_id = $3",
+        )
+        .bind(&deleted_head[..])
+        .bind(T0)
+        .bind(deleted.id)
+        .execute(pool)
+        .await
+        .expect("point head at a deleted event");
         assert_eq!(page_tsv_text(pool, deleted.id).await, None);
+
+        // The index stores the head event's own timestamp (NIP-PG rebuild
+        // invariant); a row that does not is not projected (fail closed).
+        let mut skewed = Page::new(community, channel);
+        let skewed_head = skewed.revise(pool, "skewedbody", T0).await;
+        assert!(page_tsv_text(pool, skewed.id).await.is_some());
+        sqlx::query(
+            "UPDATE pages SET head_event_id = $1, updated_at = to_timestamp($2) WHERE page_id = $3",
+        )
+        .bind(&skewed_head[..])
+        .bind(T0 + 99)
+        .bind(skewed.id)
+        .execute(pool)
+        .await
+        .expect("skew updated_at");
+        assert_eq!(page_tsv_text(pool, skewed.id).await, None);
     })
 }
 

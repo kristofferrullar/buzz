@@ -16,6 +16,7 @@ use crate::store::deletion::{
 };
 
 mod ingest_postgres_tests;
+mod search_postgres_tests;
 
 // -- Fixtures ------------------------------------------------------------------
 

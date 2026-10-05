@@ -20,8 +20,11 @@
 -- is correct for every writer of `pages` (create, advance, delete-repair and
 -- rebuild-by-replay) without any of them knowing about search. Like the rest of
 -- `pages` it is derived data: a replay of the PAGE_REVISION events reproduces
--- it. A page whose head event cannot be found (or is deleted, or is not a
--- revision) gets a NULL vector, which never matches: search fails closed.
+-- it. The head event is found by id AND timestamp: `updated_at` is the head
+-- event's own `created_at` (NIP-PG rebuild invariant), which also lets the
+-- lookup touch a single partition of `events`. A page whose head event cannot
+-- be found (or is deleted, or is not a revision) gets a NULL vector, which
+-- never matches: search fails closed.
 --
 -- Additive only: one new column, one function, one trigger and one index on the
 -- fork's own table, all idempotent. No existing object is edited.
@@ -37,6 +40,7 @@ BEGIN
           FROM events e
          WHERE e.community_id = NEW.community_id
            AND e.id = NEW.head_event_id
+           AND e.created_at = NEW.updated_at
            AND e.kind = 52000
            AND e.deleted_at IS NULL
          LIMIT 1

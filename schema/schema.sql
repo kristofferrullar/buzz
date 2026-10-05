@@ -1262,6 +1262,7 @@ BEGIN
           FROM events e
          WHERE e.community_id = NEW.community_id
            AND e.id = NEW.head_event_id
+           AND e.created_at = NEW.updated_at
            AND e.kind = 52000
            AND e.deleted_at IS NULL
          LIMIT 1
