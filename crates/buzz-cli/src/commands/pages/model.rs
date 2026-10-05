@@ -8,11 +8,11 @@
 //! rule over the revisions it read: the head is the tip (a revision no other revision
 //! names as `prev`) with the greatest `created_at`, ties to the lowest event id.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 
 use buzz_core::kind::{KIND_PAGE_REVISION, KIND_PAGE_SUGGESTION, KIND_PAGE_SUGGESTION_RESOLUTION};
-use buzz_core::page::{MAX_PAGE_CONTENT_BYTES, TAG_PAGE_ID, TAG_PREV, TAG_SUGGESTION};
+use buzz_core::page::{MAX_PAGE_CONTENT_BYTES, TAG_BASE, TAG_PAGE_ID, TAG_PREV, TAG_SUGGESTION};
 use serde_json::Value;
 
 use crate::client::normalize_write_response;
@@ -69,6 +69,53 @@ fn newest_first(a: &Value, b: &Value) -> std::cmp::Ordering {
     created_at(b)
         .cmp(&created_at(a))
         .then_with(|| event_id(a).cmp(&event_id(b)))
+}
+
+/// Order page events newest first, with causal order inside one second.
+///
+/// The relay breaks `created_at` ties by event id, which says nothing about which of
+/// two same-second events was built on the other, and an agent's edits routinely land
+/// in the same second. An event is therefore listed before the event it points at
+/// (`prev`, `base`, or a resolution's `e`) whenever both share a second; remaining ties
+/// fall back to the lowest id. Pointers leaving the given set are ignored.
+pub(super) fn sort_newest_first(events: &mut [Value]) {
+    let parents: HashMap<String, String> = events
+        .iter()
+        .filter_map(|e| {
+            let parent = [TAG_PREV, TAG_BASE, "e"]
+                .into_iter()
+                .find_map(|tag| tag_value(e, tag))?;
+            Some((event_id(e)?.to_owned(), parent.to_owned()))
+        })
+        .collect();
+    let depth = |event: &Value| {
+        let mut steps = 0;
+        let mut current = event_id(event).unwrap_or_default();
+        while let Some(parent) = parents.get(current) {
+            steps += 1;
+            if steps > parents.len() {
+                break; // a pointer cycle cannot occur for hash-linked ids; never loop on one
+            }
+            current = parent;
+        }
+        steps
+    };
+    let depths: HashMap<String, usize> = events
+        .iter()
+        .filter_map(|e| Some((event_id(e)?.to_owned(), depth(e))))
+        .collect();
+    let depth_of = |event: &Value| {
+        event_id(event)
+            .and_then(|id| depths.get(id))
+            .copied()
+            .unwrap_or(0)
+    };
+    events.sort_by(|a, b| {
+        created_at(b)
+            .cmp(&created_at(a))
+            .then_with(|| depth_of(b).cmp(&depth_of(a)))
+            .then_with(|| event_id(a).cmp(&event_id(b)))
+    });
 }
 
 /// Drop repeated events, keeping the first of each id. A REQ issued right after a
@@ -155,6 +202,13 @@ pub(super) fn open_suggestions(events: &[Value]) -> Vec<&Value> {
 /// with a [`CliError::Conflict`] (exit 5) before anything is published.
 pub(super) fn check_acceptable(head: &Value, suggestion: &Value) -> Result<(), CliError> {
     let head_id = event_id(head).unwrap_or_default();
+    // A retried accept whose first attempt landed: the head is the revision that applied
+    // this very suggestion. Say so, rather than calling it merely stale.
+    if event_id(suggestion).is_some_and(|id| tag_value(head, TAG_SUGGESTION) == Some(id)) {
+        return Err(CliError::Conflict(format!(
+            "suggestion is already applied: the page head {head_id} is the revision that applied it"
+        )));
+    }
     let base = tag_value(suggestion, "base").unwrap_or_default();
     if base != head_id {
         return Err(CliError::Conflict(format!(
@@ -453,6 +507,43 @@ mod tests {
         assert_eq!(library_heads(&revs).len(), 2);
     }
 
+    fn order_of(mut events: Vec<Value>) -> Vec<String> {
+        sort_newest_first(&mut events);
+        events
+            .iter()
+            .filter_map(|e| event_id(e).map(str::to_owned))
+            .collect()
+    }
+
+    #[test]
+    fn history_order_is_causal_inside_one_second_whatever_the_ids() {
+        // Three edits in one second. Ids 3 < 5 < 9 but the chain is 5 -> 9 -> 3, so a
+        // plain (created_at, id) order would list the newest edit last.
+        let chain = vec![
+            rev(5, None, 100),
+            rev(9, Some(5), 100),
+            rev(3, Some(9), 100),
+        ];
+        assert_eq!(order_of(chain), vec![id(3), id(9), id(5)]);
+    }
+
+    #[test]
+    fn history_order_is_newest_first_across_seconds_and_id_ordered_for_unrelated_ties() {
+        let events = vec![
+            rev(1, None, 100),
+            rev(8, Some(1), 300),
+            rev(7, Some(1), 300), // a fork in the same second: lowest id first
+            rev(2, Some(1), 200),
+        ];
+        assert_eq!(order_of(events), vec![id(7), id(8), id(2), id(1)]);
+    }
+
+    #[test]
+    fn a_suggestion_lists_before_the_revision_it_edits_when_they_share_a_second() {
+        let events = vec![rev(1, None, 100), suggestion(0, 1, 100)];
+        assert_eq!(order_of(events), vec![id(0), id(1)]);
+    }
+
     #[test]
     fn dedupe_keeps_the_first_of_each_id() {
         let events = vec![rev(1, None, 100), rev(2, Some(1), 200), rev(1, None, 100)];
@@ -525,6 +616,18 @@ mod tests {
         assert!(matches!(err, CliError::Conflict(_)), "{err:?}");
         assert_eq!(crate::error::exit_code(&err), 5);
         assert!(err.to_string().contains(&id(2)), "{err}");
+    }
+
+    #[test]
+    fn a_suggestion_the_head_already_applied_is_reported_as_applied() {
+        let mut head = rev(2, Some(1), 200);
+        head["tags"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(["suggestion", id(10)]));
+        let err = check_acceptable(&head, &suggestion(10, 1, 150)).unwrap_err();
+        assert!(matches!(err, CliError::Conflict(_)), "{err:?}");
+        assert!(err.to_string().contains("already applied"), "{err}");
     }
 
     #[test]

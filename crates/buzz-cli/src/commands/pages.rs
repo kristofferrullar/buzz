@@ -46,9 +46,9 @@ use crate::OutputFormat;
 use model::{
     check_acceptable, check_content, content, created_at, dedupe_by_id, event_id, event_kind,
     interpret_write_response, is_revision_of, library_heads, map_write_error, open_suggestions,
-    read_bounded, resolve_head, resolve_set_target, tag_value, SetTarget, HEAD_WINDOW,
-    HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, LIBRARY_SCAN_MAX, LS_DEFAULT_LIMIT, LS_MAX_LIMIT,
-    SUGGESTION_SCAN_MAX,
+    read_bounded, resolve_head, resolve_set_target, sort_newest_first, tag_value, SetTarget,
+    HEAD_WINDOW, HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, LIBRARY_SCAN_MAX, LS_DEFAULT_LIMIT,
+    LS_MAX_LIMIT, SUGGESTION_SCAN_MAX,
 };
 
 /// `buzz pages` subcommands.
@@ -541,11 +541,7 @@ async fn cmd_history(
             "page {page} not found in channel {channel}"
         )));
     }
-    listed.sort_by(|a, b| {
-        created_at(b)
-            .cmp(&created_at(a))
-            .then_with(|| event_id(a).cmp(&event_id(b)))
-    });
+    sort_newest_first(&mut listed);
     Ok(match format {
         OutputFormat::Json => normalize_events(&listed),
         OutputFormat::Compact => {

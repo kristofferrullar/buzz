@@ -663,6 +663,24 @@ async fn accept_refuses_a_stale_suggestion_with_exit_5_and_publishes_nothing() {
 }
 
 #[tokio::test]
+async fn accepting_twice_publishes_once_and_the_second_call_exits_5() {
+    let relay = fake_relay().await;
+    relay.revision(1, None, 100, "T", "v1");
+    relay.suggestion(10, 1, 150, "proposed v2");
+    cmd_accept(&relay.client, &id(10), CH, PG).await.unwrap();
+    let err = cmd_accept(&relay.client, &id(10), CH, PG)
+        .await
+        .unwrap_err();
+    assert_eq!(exit_code(&err), 5, "{err:?}");
+    assert!(err.to_string().contains("already applied"), "{err}");
+    assert_eq!(
+        relay.posted().len(),
+        1,
+        "the retry must not publish a second revision"
+    );
+}
+
+#[tokio::test]
 async fn accept_refuses_a_suggestion_that_belongs_to_another_page() {
     let relay = fake_relay().await;
     relay.revision(1, None, 100, "T", "v1");
