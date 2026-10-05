@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { usePagesLiveUpdates } from "../hooks";
 import { pageKey } from "../lib/pageModel";
 import type { PageSelection, PagesHostBindings } from "../types";
@@ -27,7 +28,12 @@ export function PagesScreen({
   selection,
   useAuthorLabels,
 }: PagesScreenProps) {
-  usePagesLiveUpdates(communityId);
+  const { channels } = useChannelNavigation();
+  const channelIds = React.useMemo(
+    () => channels.map((channel) => channel.id),
+    [channels],
+  );
+  usePagesLiveUpdates(communityId, channelIds);
 
   // Remember which page was opened so closing it can put focus back on its row.
   const [restoreFocusKey, setRestoreFocusKey] = React.useState<string | null>(
