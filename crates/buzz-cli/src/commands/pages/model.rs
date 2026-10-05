@@ -745,11 +745,33 @@ mod tests {
         assert!(matches!(err, CliError::Usage(_)), "{err:?}");
     }
 
+    /// An endless reader that counts what it hands out and fails loudly, rather than
+    /// letting a regression drain memory.
+    struct Endless<'a>(&'a std::cell::Cell<usize>);
+
+    impl Read for Endless<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.0.get() > 4 * MAX_PAGE_CONTENT_BYTES {
+                return Err(std::io::Error::other("read far past the page cap"));
+            }
+            buf.fill(b'a');
+            self.0.set(self.0.get() + buf.len());
+            Ok(buf.len())
+        }
+    }
+
     #[test]
     fn a_reader_is_never_drained_past_the_cap() {
-        // An endless reader terminates: the intake is bounded, not just validated.
-        let err = read_bounded(std::io::repeat(b'a'), "stdin").unwrap_err();
+        let served = std::cell::Cell::new(0);
+        let err = read_bounded(Endless(&served), "stdin").unwrap_err();
         assert!(matches!(err, CliError::Usage(_)), "{err:?}");
+        // The cap plus the one probe byte, within one buffer's overshoot.
+        assert!(served.get() > MAX_PAGE_CONTENT_BYTES, "{}", served.get());
+        assert!(
+            served.get() <= 2 * MAX_PAGE_CONTENT_BYTES,
+            "{}",
+            served.get()
+        );
     }
 
     #[test]

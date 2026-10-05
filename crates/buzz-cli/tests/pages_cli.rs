@@ -367,8 +367,8 @@ fn pages_workflow_against_a_live_relay() {
     ]);
     assert_eq!(refused.code, 5, "stderr: {}", refused.stderr);
     assert!(
-        refused.stderr.contains("stale"),
-        "stderr: {}",
+        refused.stderr.contains("is not the page head"),
+        "the CLI refuses before publishing (the relay would reject it too): {}",
         refused.stderr
     );
     assert_eq!(
