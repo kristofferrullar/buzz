@@ -254,9 +254,9 @@ events never match, and a page is one hit however many revisions mention the
 text.
 
 - **Opt in by kind.** Pages are searched when the filter's `kinds` names
-  `52000`: `{"kinds":[52000], "search":"roadmap"}`. A kindless search keeps
-  returning only the relay's default searchable kinds (page revisions are not
-  among them), and a filter naming only `52001` or `52002` matches nothing,
+  `52000`: `{"kinds":[52000], "search":"roadmap"}`. A search that does not name
+  it never returns page events (this includes a kindless search where the relay
+  accepts one), and a filter naming only `52001` or `52002` matches nothing,
   because suggestions and resolutions are never searchable. A filter may mix
   kinds (`[9, 52000]`); hits are ranked together.
 - **Scope.** Hits are the head revision events, scoped like any channel event:

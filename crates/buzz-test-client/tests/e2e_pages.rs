@@ -1409,10 +1409,11 @@ async fn search_matches_a_page_only_through_its_head_over_req_and_query() {
             .await
             .is_empty()
     );
-    // Pages are opt-in by kind: a kindless search does not return them.
-    assert!(!search_ids(&mut alice, &[], &word("charliebody"))
+    // Pages are opt-in by kind: a search that does not name the revision kind
+    // never returns a page event, even for the head's exact words.
+    assert!(search_ids(&mut alice, &[9, 40002], &word("charliebody"))
         .await
-        .contains(&r3.id));
+        .is_empty());
 
     // The HTTP bridge answers the same.
     assert_eq!(
