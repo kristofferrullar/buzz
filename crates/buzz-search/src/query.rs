@@ -15,6 +15,7 @@ use buzz_core::CommunityId;
 use buzz_datastore_tracing::datastore_span;
 
 use crate::error::SearchError;
+use crate::page_head;
 
 /// Channel-scope filter for a community-scoped FTS query.
 ///
@@ -139,7 +140,11 @@ const SEARCH_TEXT_MAX_CHARS: usize = 4096;
 /// wire untrusted input into a multi-trillion-row OFFSET.
 const PAGE_MAX: u32 = 1000;
 
-fn push_tsquery(qb: &mut QueryBuilder<sqlx::Postgres>, mode: SearchMode, search_text: &str) {
+pub(crate) fn push_tsquery(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    mode: SearchMode,
+    search_text: &str,
+) {
     match mode {
         SearchMode::FullText => {
             qb.push("websearch_to_tsquery('simple', ");
@@ -178,6 +183,65 @@ fn push_tsquery(qb: &mut QueryBuilder<sqlx::Postgres>, mode: SearchMode, search_
         }
     }
 }
+
+/// Push the caller-supplied scope filters (channel scope, kinds, authors,
+/// since, until) onto a statement whose row source is named `events`.
+///
+/// Shared by the generic `events` arm and the page-head arm
+/// ([`crate::page_head`]) so both honor exactly the same NIP-01 constraints.
+pub(crate) fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, query: &SearchQuery) {
+    // Channel scope — see `ChannelScope` doc for the four-case mapping. The
+    // emitted SQL fragments are identical to the legacy 2x2 tuple for the
+    // three carry-over cases; `ChannelLessOnly` is the new fence that the
+    // old shape could not express.
+    match &query.channel_scope {
+        ChannelScope::Any => {
+            // No channel constraint.
+        }
+        ChannelScope::ChannelLessOnly => {
+            qb.push(" AND channel_id IS NULL");
+        }
+        ChannelScope::Channels(ids) => {
+            qb.push(" AND channel_id = ANY(");
+            qb.push_bind(ids.clone());
+            qb.push(")");
+        }
+        ChannelScope::ChannelsOrChannelLess(ids) => {
+            qb.push(" AND (channel_id = ANY(");
+            qb.push_bind(ids.clone());
+            qb.push(") OR channel_id IS NULL)");
+        }
+    }
+
+    if let Some(ref kinds) = query.kinds {
+        if !kinds.is_empty() {
+            qb.push(" AND kind = ANY(");
+            qb.push_bind(kinds.clone());
+            qb.push(")");
+        }
+    }
+
+    if let Some(ref authors) = query.authors {
+        if !authors.is_empty() {
+            qb.push(" AND pubkey = ANY(");
+            qb.push_bind(authors.clone());
+            qb.push(")");
+        }
+    }
+
+    if let Some(since) = query.since {
+        qb.push(" AND created_at >= to_timestamp(");
+        qb.push_bind(since);
+        qb.push(")");
+    }
+
+    if let Some(until) = query.until {
+        qb.push(" AND created_at <= to_timestamp(");
+        qb.push_bind(until);
+        qb.push(")");
+    }
+}
+
 fn normalized_search_text(q: &str) -> Option<String> {
     let trimmed = q.trim();
     if trimmed.is_empty() {
@@ -242,7 +306,7 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         && search_text.chars().count() <= 2;
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
-        "SELECT id, kind, pubkey, channel_id, \
+        "SELECT id, kind, pubkey, channel_id, created_at, \
          EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s, \
          ts_rank_cd(search_tsv, search_query.query) AS rank \
          FROM events CROSS JOIN LATERAL (SELECT ",
@@ -251,57 +315,12 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     qb.push(" AS query) AS search_query WHERE community_id = ");
     qb.push_bind(*query.community.as_uuid());
     qb.push(" AND deleted_at IS NULL AND search_tsv @@ search_query.query");
+    // Page kinds never match through the generic index: a page matches only
+    // through its head revision, which `push_page_head_arm` adds below.
+    page_head::push_page_kind_exclusion(&mut qb);
 
-    // Channel scope — see `ChannelScope` doc for the four-case mapping. The
-    // emitted SQL fragments are identical to the legacy 2x2 tuple for the
-    // three carry-over cases; `ChannelLessOnly` is the new fence that the
-    // old shape could not express.
-    match &query.channel_scope {
-        ChannelScope::Any => {
-            // No channel constraint.
-        }
-        ChannelScope::ChannelLessOnly => {
-            qb.push(" AND channel_id IS NULL");
-        }
-        ChannelScope::Channels(ids) => {
-            qb.push(" AND channel_id = ANY(");
-            qb.push_bind(ids.clone());
-            qb.push(")");
-        }
-        ChannelScope::ChannelsOrChannelLess(ids) => {
-            qb.push(" AND (channel_id = ANY(");
-            qb.push_bind(ids.clone());
-            qb.push(") OR channel_id IS NULL)");
-        }
-    }
-
-    if let Some(ref kinds) = query.kinds {
-        if !kinds.is_empty() {
-            qb.push(" AND kind = ANY(");
-            qb.push_bind(kinds.clone());
-            qb.push(")");
-        }
-    }
-
-    if let Some(ref authors) = query.authors {
-        if !authors.is_empty() {
-            qb.push(" AND pubkey = ANY(");
-            qb.push_bind(authors.clone());
-            qb.push(")");
-        }
-    }
-
-    if let Some(since) = query.since {
-        qb.push(" AND created_at >= to_timestamp(");
-        qb.push_bind(since);
-        qb.push(")");
-    }
-
-    if let Some(until) = query.until {
-        qb.push(" AND created_at <= to_timestamp(");
-        qb.push_bind(until);
-        qb.push(")");
-    }
+    push_event_filters(&mut qb, query);
+    page_head::push_page_head_arm(&mut qb, query, &search_text);
 
     if prioritize_exact_profile_lexeme {
         qb.push(" ORDER BY search_tsv @@ websearch_to_tsquery('simple', ");

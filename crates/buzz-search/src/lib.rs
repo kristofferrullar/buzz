@@ -26,6 +26,8 @@ pub mod error;
 /// Search query execution.
 pub mod query;
 
+mod page_head;
+
 pub use buzz_core::CommunityId;
 pub use error::SearchError;
 pub use query::{search, ChannelScope, SearchHit, SearchMode, SearchQuery, SearchResult};
