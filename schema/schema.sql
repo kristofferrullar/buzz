@@ -1799,6 +1799,7 @@ SELECT attach_community_write_fence('git_repo_names');
 SELECT attach_community_write_fence('join_policy_acceptances');
 SELECT attach_community_write_fence('moderation_actions');
 SELECT attach_community_write_fence('moderation_reports');
+SELECT attach_community_write_fence('pages');
 SELECT attach_community_write_fence('parameterized_event_watermarks');
 SELECT attach_community_write_fence('pubkey_allowlist');
 SELECT attach_community_write_fence('push_leases');
