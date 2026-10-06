@@ -26,7 +26,8 @@ use uuid::Uuid;
 
 use super::{
     canonical_uuid, load_revisions, lowercase_hex_32, reproject_page_in_transaction, resolve_page,
-    row_to_record, PageRecord, PageRevisionError, PageRevisionMeta, TAG_CHANNEL,
+    row_to_record, PageRecord, PageRevisionError, PageRevisionMeta, MAX_REPLAY_REVISIONS_PER_PAGE,
+    TAG_CHANNEL,
 };
 use crate::error::{DbError, Result};
 
@@ -300,6 +301,7 @@ pub async fn align_recreated_page_in_transaction(
         community,
         revision.channel_id,
         revision.page_id,
+        MAX_REPLAY_REVISIONS_PER_PAGE,
     )
     .await?;
     let Some(resolved) = resolve_page(&revisions) else {
