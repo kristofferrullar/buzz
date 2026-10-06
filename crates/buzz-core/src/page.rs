@@ -90,6 +90,22 @@ mod tests {
         }
     }
 
+    /// True when `source` has a line that is exactly `declaration`, so a
+    /// commented-out copy or a longer name sharing the prefix cannot satisfy it.
+    fn has_live_line(source: &str, declaration: &str) -> bool {
+        source.lines().any(|line| line.trim() == declaration)
+    }
+
+    #[test]
+    fn has_live_line_ignores_comments_and_longer_names() {
+        let source = "// export const KIND_X = 1;\nexport const KIND_X_V2 = 1;\n";
+        assert!(!has_live_line(source, "export const KIND_X = 1;"));
+        assert!(has_live_line(
+            "  export const KIND_X = 1;\n",
+            "export const KIND_X = 1;"
+        ));
+    }
+
     #[test]
     fn client_mirrors_match_kind_registry() {
         let ts = include_str!("../../../desktop/src/shared/constants/kinds.ts");
@@ -108,11 +124,11 @@ mod tests {
             ),
         ] {
             assert!(
-                ts.contains(&format!("export const {ts_name} = {kind};")),
+                has_live_line(ts, &format!("export const {ts_name} = {kind};")),
                 "desktop kinds.ts out of sync for {ts_name}"
             );
             assert!(
-                dart.contains(&format!("static const {dart_name} = {kind};")),
+                has_live_line(dart, &format!("static const {dart_name} = {kind};")),
                 "mobile nostr_models.dart out of sync for {dart_name}"
             );
         }
