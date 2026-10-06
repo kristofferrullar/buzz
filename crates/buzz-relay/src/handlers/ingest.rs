@@ -3161,7 +3161,8 @@ async fn ingest_event_inner(
         let page_channel = channel_id.ok_or_else(|| {
             IngestError::Rejected("invalid: channel-scoped events must include an h tag".into())
         })?;
-        super::pages::store_page_event(tenant, state, &event, page_channel).await?
+        super::pages::store_page_event(tenant, state, &event, page_channel, auth.channel_ids())
+            .await?
     } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.

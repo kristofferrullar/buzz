@@ -1173,6 +1173,58 @@ async fn replay_skips_and_reports_malformed_page_events() {
     assert_eq!(rows[0].head_event_id, id32(&good));
 }
 
+/// A page with more stored revisions than the replay cap fails the replay loudly.
+/// It must never be replayed from a truncated history: that would publish a head
+/// that is not the page's head (NIP-PG Rebuild Invariant). The cap is injected so
+/// the test needs a handful of events, but the failing path is production's
+/// `reproject_locked` -> `load_revisions`.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn replay_over_the_revision_cap_fails_instead_of_truncating() {
+    let db = test_db().await;
+    let community = make_community(&db).await;
+    let channel = make_channel(&db, community).await;
+    let keys = Keys::generate();
+    let page = Uuid::new_v4();
+    let r1 = revision(&keys, channel, page, None, "v1", 1_000);
+    let r2 = revision(&keys, channel, page, Some(&r1), "v2", 2_000);
+    let r3 = revision(&keys, channel, page, Some(&r2), "v3", 3_000);
+    for event in [&r1, &r2, &r3] {
+        publish(&db, community, event).await.expect("publish");
+    }
+    let before = live_rows(&db, community).await;
+
+    // One revision over the cap: the replay refuses, naming the page, and writes nothing.
+    let mut tx = db.begin_event_write_transaction().await.expect("tx");
+    lock_channel_pages(tx.as_mut(), community, channel, PageLock::Exclusive)
+        .await
+        .expect("lock");
+    let refused = reproject_locked(tx.as_mut(), community, channel, page, 2)
+        .await
+        .expect_err("3 revisions exceed a cap of 2");
+    assert!(
+        matches!(&refused, DbError::InvalidData(message)
+            if message.contains(&page.to_string()) && message.contains("partial replay")),
+        "unexpected error: {refused:?}"
+    );
+    drop(tx);
+    assert_eq!(live_rows(&db, community).await, before);
+
+    // Exactly at the cap the replay succeeds and sees every revision.
+    let mut tx = db.begin_event_write_transaction().await.expect("tx");
+    lock_channel_pages(tx.as_mut(), community, channel, PageLock::Exclusive)
+        .await
+        .expect("lock");
+    let (record, malformed) = reproject_locked(tx.as_mut(), community, channel, page, 3)
+        .await
+        .expect("3 revisions fit a cap of 3");
+    tx.commit().await.expect("commit");
+    assert_eq!(malformed, 0);
+    let record = record.expect("page has a live head");
+    assert_eq!(record.head_event_id, id32(&r3));
+    assert_eq!(record.revision_count, 3);
+}
+
 /// A rebuild computes heads from a snapshot of the events; a writer that is
 /// mid-transaction must not be overwritten with that stale snapshot. The rebuild
 /// waits for the writer's page lock, then reads the committed events.

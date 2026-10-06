@@ -342,6 +342,97 @@ fn reference_check_table() {
     );
 }
 
+/// A reference outside the event's channel is held back for an access check
+/// (`store_page_event` describes it only to a reader of that channel); a failure
+/// inside the channel is final. The hidden answer is exactly the one for an id
+/// that was never stored.
+#[test]
+fn references_outside_the_channel_are_marked_foreign_with_the_missing_answer() {
+    let (channel, page) = (Uuid::new_v4(), Uuid::new_v4());
+    let (other_channel, other_page) = (Uuid::new_v4(), Uuid::new_v4());
+
+    let foreign = |rec: &PageEventRecord, tag: &str, kind: u32| match check_scoped_reference(
+        rec, tag, kind, channel, page,
+    ) {
+        Err(Refusal::Foreign {
+            channel,
+            shown,
+            hidden,
+        }) => (channel, shown, hidden),
+        other => panic!("expected a foreign reference, got {other:?}"),
+    };
+    // Another channel: described to its readers, missing to everyone else.
+    let (at, shown, hidden) = foreign(
+        &record(KIND_PAGE_REVISION, other_channel, page, Some(other_channel)),
+        "prev",
+        KIND_PAGE_REVISION,
+    );
+    assert_eq!(at, Some(other_channel));
+    assert_eq!(shown, "invalid: prev event belongs to a different channel");
+    assert_eq!(hidden, "conflict: prev revision not found");
+    // The wrong kind of event in another channel must not confirm that it exists.
+    let (_, shown, hidden) = foreign(
+        &record(
+            KIND_PAGE_SUGGESTION,
+            other_channel,
+            page,
+            Some(other_channel),
+        ),
+        "base",
+        KIND_PAGE_REVISION,
+    );
+    assert_eq!(shown, "invalid: base must reference a page revision event");
+    assert_eq!(hidden, "invalid: base event not found");
+    // An event with no channel at all.
+    let (at, _, hidden) = foreign(
+        &record(KIND_PAGE_REVISION, channel, page, None),
+        "rev",
+        KIND_PAGE_REVISION,
+    );
+    assert_eq!(at, None);
+    assert_eq!(hidden, "invalid: rev event not found");
+
+    // Inside the channel the answer is final: the caller can read all of it.
+    for (rec, tag, kind, expected) in [
+        (
+            record(KIND_PAGE_REVISION, channel, other_page, Some(channel)),
+            "prev",
+            KIND_PAGE_REVISION,
+            "invalid: prev event belongs to a different page",
+        ),
+        (
+            record(KIND_PAGE_SUGGESTION, channel, page, Some(channel)),
+            "e",
+            KIND_PAGE_REVISION,
+            "invalid: e must reference a page revision event",
+        ),
+    ] {
+        match check_scoped_reference(&rec, tag, kind, channel, page) {
+            Err(Refusal::Ingest(IngestError::Rejected(message))) => assert_eq!(message, expected),
+            other => panic!("expected a final rejection, got {other:?}"),
+        }
+    }
+    assert!(check_scoped_reference(
+        &record(KIND_PAGE_REVISION, channel, page, Some(channel)),
+        "prev",
+        KIND_PAGE_REVISION,
+        channel,
+        page
+    )
+    .is_ok());
+}
+
+/// A scoped token only describes the channels it reaches, even when the key's
+/// owner is a member of others.
+#[test]
+fn a_scoped_token_describes_only_channels_it_reaches() {
+    let (inside, outside) = (Uuid::new_v4(), Uuid::new_v4());
+    assert!(token_allows(None, outside));
+    assert!(token_allows(Some(&[inside]), inside));
+    assert!(!token_allows(Some(&[inside]), outside));
+    assert!(!token_allows(Some(&[]), inside));
+}
+
 #[test]
 fn head_conflicts_map_to_stable_conflict_messages() {
     let head = [9_u8; 32];
