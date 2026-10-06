@@ -70,13 +70,20 @@ reply).
    exist (not deleted), be of the right kind, and share the event's `(h, d)`:
    another channel or another page of the same channel is rejected, like a
    reaction or vote aimed at an event in a different channel. References are
-   resolved inside the event's community only.
+   resolved inside the event's community only. A reference to an event in a
+   channel the author cannot read (or that has no channel) is answered exactly
+   as an id that was never stored (`... not found`), so a rejection never
+   reveals which events exist elsewhere; "different channel" and "wrong kind"
+   are reported only for events in the event's own channel or a channel the
+   author can read.
 3. **Head.** A page's head is the newest revision in its `prev` chain. A new
    revision is accepted only if `prev` equals the current head (or the page does
    not exist and `prev` is absent). Otherwise the relay rejects with a
    `conflict:` message and stores nothing. A `prev` that was never stored is the
    same conflict.
 4. Revisions whose content and title equal the head's are rejected as no-ops.
+   Rule 3 is decided first: a revision on a stale `prev` is a `conflict:` even
+   when its text equals that `prev`'s, because it is not equal to the head.
 5. Content is bounded to 64 KiB (65,536 **bytes**, not characters) for page
    kinds; oversize is rejected, not truncated. The title is non-blank and at
    most 256 bytes. (The relay's generic event cap is larger; page kinds are held
@@ -196,7 +203,7 @@ treats an accepted `duplicate:` answer as success.
 |---------|---------|
 | `conflict: stale prev (head <id>)` | `prev` is not the head; rebuild on `<id>` |
 | `conflict: page already exists (head <id>)` | a first revision of an existing page |
-| `conflict: prev revision not found` | `prev` was never stored (or was deleted) |
+| `conflict: prev revision not found` | `prev` was never stored (or was deleted, or lives in a channel the author cannot read) |
 | `conflict: page does not exist` / `conflict: page is deleted` | no live page to advance |
 | `conflict: suggestion is stale (its base is not the revision's prev)` | the head moved past the suggestion's `base` |
 | `conflict: suggestion is already closed` | applying a suggestion that a resolution or revision closed |
@@ -208,8 +215,8 @@ treats an accepted `duplicate:` answer as success.
 | `invalid: channel-scoped events must include an h tag` | no `h` tag (generic channel gate) |
 | `invalid: page event must carry exactly one <tag> tag` / `... at most one prev tag` | tag multiplicity |
 | `invalid: page <tag> tag is malformed: <reason>` | non-canonical UUID or event id |
-| `invalid: <tag> event not found` | `base`, `e`, `suggestion` or `rev` names no stored event |
-| `invalid: <tag> event belongs to a different channel` / `... different page` | rule 2 |
+| `invalid: <tag> event not found` | `base`, `e`, `suggestion` or `rev` names no stored event, or one in a channel the author cannot read |
+| `invalid: <tag> event belongs to a different channel` / `... different page` | rule 2 (a different channel only when the author can read it) |
 | `invalid: <tag> must reference a page revision event` / `... suggestion event` | wrong kind |
 | `invalid: rev must be a revision published by the resolver` / `invalid: rev applies a different suggestion` | resolution `rev` rules |
 | `invalid: channel is archived` | rule 1 |

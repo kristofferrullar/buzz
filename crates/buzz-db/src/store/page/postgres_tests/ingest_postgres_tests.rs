@@ -105,9 +105,15 @@ async fn ingest(db: &Db, community: CommunityId, event: &Event) {
         .expect("insert page event");
     assert!(inserted, "test events are unique");
     if kind == KIND_PAGE_REVISION {
-        record_page_revision_in_transaction(&mut tx, community, &meta(event))
+        let meta = meta(event);
+        record_page_revision_in_transaction(&mut tx, community, &meta)
             .await
             .expect("move head");
+        if meta.prev.is_none() {
+            align_recreated_page_in_transaction(&mut tx, community, &meta)
+                .await
+                .expect("align a recreated page");
+        }
     }
     tx.commit().await.expect("commit");
 }
@@ -448,6 +454,73 @@ async fn page_writer_lock_serializes_one_page_and_times_out_instead_of_hanging()
         .expect("lock is free after commit");
 }
 
+/// A suggestion does not touch the index row, so whole-page deletion cannot see an
+/// in-flight suggestion writer through it. The deletion therefore waits on the page
+/// writer lock, and a suggestion that commits in the meantime is deleted with the
+/// page rather than left live against a deleted page.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn deleting_a_whole_page_waits_for_an_in_flight_writer_and_takes_its_event_along() {
+    let db = test_db().await;
+    let community = make_community(&db).await;
+    let channel = make_channel(&db, community).await;
+    let page = Uuid::new_v4();
+    let keys = Keys::generate();
+    let root = revision(&keys, channel, page, None, "Doomed", 1_700_000_000);
+    publish(&db, community, &root)
+        .await
+        .expect("create the page");
+
+    // The suggestion writer holds the page lock and has seen its base live.
+    let mut writer = db.begin_event_write_transaction().await.expect("tx");
+    lock_page_for_write_in_transaction(&mut writer, community, channel, page)
+        .await
+        .expect("writer locks the page");
+    assert!(
+        load_event_in_transaction(&mut writer, community, &id32(&root))
+            .await
+            .expect("load base")
+            .is_some(),
+        "the base is live when the writer reads it"
+    );
+
+    // Deleting the page has to wait for that writer.
+    let mut deleter = db.begin_event_write_transaction().await.expect("tx");
+    let delete = tokio::spawn(async move {
+        let deleted = soft_delete_page_in_transaction(&mut deleter, community, channel, page)
+            .await
+            .expect("delete the page");
+        deleter.commit().await.expect("commit the deletion");
+        deleted
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !delete.is_finished(),
+        "whole-page deletion must wait for the page's in-flight writer"
+    );
+
+    let late = suggestion(&keys, channel, page, &root, 1_700_000_100);
+    let (_, inserted) = insert_page_event_in_transaction(&mut writer, community, &late, channel)
+        .await
+        .expect("insert the suggestion");
+    assert!(inserted);
+    writer.commit().await.expect("commit the writer");
+
+    assert!(delete.await.expect("the deletion task finishes"));
+
+    for event in [&root, &late] {
+        let live: bool = sqlx::query_scalar(
+            "SELECT deleted_at IS NULL FROM events WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .fetch_one(&db.pool)
+        .await
+        .expect("read the event");
+        assert!(!live, "{} must be deleted with its page", event.id);
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn deleting_a_revision_repairs_the_head_in_the_same_transaction() {
@@ -520,6 +593,53 @@ async fn deleting_a_revision_repairs_the_head_in_the_same_transaction() {
         tx.commit().await.expect("commit");
     }
     assert!(live_rows(&db, community).await.is_empty());
+}
+
+/// Deleting a page's last live revision removes its row but keeps the deleted
+/// events; creating the page id anew must produce the row a replay computes
+/// (revision count over every stored revision, creator and time from the earliest
+/// root), or the first re-projection would silently rewrite it.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_page_created_anew_after_its_history_was_deleted_reads_like_a_replay() {
+    let db = test_db().await;
+    let community = make_community(&db).await;
+    let channel = make_channel(&db, community).await;
+    let page = Uuid::new_v4();
+    let (alice, bob) = (Keys::generate(), Keys::generate());
+    let r1 = revision(&alice, channel, page, None, "first", 1_000);
+    let r2 = revision(&alice, channel, page, Some(&r1), "second", 2_000);
+    ingest(&db, community, &r1).await;
+    ingest(&db, community, &r2).await;
+    for event in [&r2, &r1] {
+        let mut tx = db.begin_event_write_transaction().await.expect("tx");
+        soft_delete_page_event_in_transaction(&mut tx, community, event.id.as_bytes())
+            .await
+            .expect("delete");
+        tx.commit().await.expect("commit");
+    }
+    assert!(live_rows(&db, community).await.is_empty());
+
+    // Bob creates the page id anew.
+    let reborn = revision(&bob, channel, page, None, "again", 5_000);
+    ingest(&db, community, &reborn).await;
+    let live = live_rows(&db, community).await;
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].head_event_id, id32(&reborn));
+    assert_eq!(live[0].revision_count, 3, "deleted revisions still count");
+    assert_eq!(live[0].created_by, alice.public_key().to_bytes());
+    assert_eq!(live[0].created_at.timestamp(), 1_000);
+    assert_eq!(live[0].updated_by, bob.public_key().to_bytes());
+    db.rebuild_pages(community).await.expect("rebuild");
+    assert_eq!(live_rows(&db, community).await, live, "a replay agrees");
+
+    // Later edits keep the two in step.
+    let next = revision(&bob, channel, page, Some(&reborn), "next", 6_000);
+    ingest(&db, community, &next).await;
+    let live = live_rows(&db, community).await;
+    assert_eq!(live[0].revision_count, 4);
+    db.rebuild_pages(community).await.expect("rebuild");
+    assert_eq!(live_rows(&db, community).await, live);
 }
 
 #[tokio::test]

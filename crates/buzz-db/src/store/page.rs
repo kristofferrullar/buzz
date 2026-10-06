@@ -706,12 +706,21 @@ pub async fn list_pages_for_channels(
 /// read and a rebuild by replay agrees (it finds no live revision). Returns
 /// `false` without touching anything when there is no live page with this
 /// identity in `community`.
+///
+/// Takes the page's writer lock ([`lock_page_for_write_in_transaction`]) first. A
+/// suggestion or resolution in flight has already read the page's live events and
+/// does not touch the index row, so without the lock it could commit its event
+/// after this transaction soft-deleted the page's events and leave it live against
+/// a deleted page. With it, such a writer either commits before this transaction
+/// reads the events (and is deleted with them) or starts after it ends (and finds
+/// no live reference). The wait is bounded by [`PAGE_WRITE_LOCK_TIMEOUT_MS`].
 pub async fn soft_delete_page_in_transaction(
     tx: &mut Transaction<'_, Postgres>,
     community: CommunityId,
     channel_id: Uuid,
     page_id: Uuid,
 ) -> Result<bool> {
+    lock_page_for_write_in_transaction(tx, community, channel_id, page_id).await?;
     lock_channel_pages(tx.as_mut(), community, channel_id, PageLock::Shared).await?;
     let tombstoned = sqlx::query(
         "UPDATE pages SET deleted_at = NOW() \
@@ -852,13 +861,18 @@ fn revision_node(
 }
 
 /// Load a page's stored revisions (soft-deleted ones included) from `events`.
+///
+/// At most `max_revisions` rows are accepted (production passes
+/// [`MAX_REPLAY_REVISIONS_PER_PAGE`]); a page with more fails loudly instead of
+/// being replayed from a truncated history.
 async fn load_revisions(
     conn: &mut PgConnection,
     community: CommunityId,
     channel_id: Uuid,
     page_id: Uuid,
+    max_revisions: usize,
 ) -> Result<(Vec<RevisionNode>, usize)> {
-    let cap = i64::try_from(MAX_REPLAY_REVISIONS_PER_PAGE).unwrap_or(i64::MAX);
+    let cap = i64::try_from(max_revisions).unwrap_or(i64::MAX);
     let rows = sqlx::query(
         "SELECT id, pubkey, created_at, tags, deleted_at IS NOT NULL AS is_deleted \
          FROM events \
@@ -870,12 +884,12 @@ async fn load_revisions(
     .bind(KIND_PAGE_REVISION as i32)
     .bind(tag_containment(TAG_CHANNEL, channel_id))
     .bind(tag_containment(TAG_PAGE_ID, page_id))
-    .bind(cap + 1)
+    .bind(cap.saturating_add(1))
     .fetch_all(conn)
     .await?;
     if rows.len() as i64 > cap {
         return Err(DbError::InvalidData(format!(
-            "page {page_id} in channel {channel_id} has more than {MAX_REPLAY_REVISIONS_PER_PAGE} \
+            "page {page_id} in channel {channel_id} has more than {max_revisions} \
              revisions; refusing a partial replay"
         )));
     }
@@ -900,14 +914,17 @@ async fn load_revisions(
 }
 
 /// Recompute one page's row from its events and write it. The caller holds the
-/// exclusive channel lock.
+/// exclusive channel lock. `max_revisions` bounds the replay (see
+/// [`load_revisions`]).
 async fn reproject_locked(
     conn: &mut PgConnection,
     community: CommunityId,
     channel_id: Uuid,
     page_id: Uuid,
+    max_revisions: usize,
 ) -> Result<(Option<PageRecord>, usize)> {
-    let (revisions, malformed) = load_revisions(conn, community, channel_id, page_id).await?;
+    let (revisions, malformed) =
+        load_revisions(conn, community, channel_id, page_id, max_revisions).await?;
     let Some(resolved) = resolve_page(&revisions) else {
         sqlx::query(
             "DELETE FROM pages WHERE community_id = $1 AND channel_id = $2 AND page_id = $3",
@@ -959,11 +976,15 @@ pub async fn reproject_page_in_transaction(
     page_id: Uuid,
 ) -> Result<Option<PageRecord>> {
     lock_channel_pages(tx.as_mut(), community, channel_id, PageLock::Exclusive).await?;
-    Ok(
-        reproject_locked(tx.as_mut(), community, channel_id, page_id)
-            .await?
-            .0,
+    Ok(reproject_locked(
+        tx.as_mut(),
+        community,
+        channel_id,
+        page_id,
+        MAX_REPLAY_REVISIONS_PER_PAGE,
     )
+    .await?
+    .0)
 }
 
 /// Rebuild every page of one channel from its stored `PAGE_REVISION` events.
@@ -1012,8 +1033,14 @@ pub async fn rebuild_pages_for_channel_in_transaction(
         }
     }
     for page_id in page_ids {
-        let (record, malformed) =
-            reproject_locked(tx.as_mut(), community, channel_id, page_id).await?;
+        let (record, malformed) = reproject_locked(
+            tx.as_mut(),
+            community,
+            channel_id,
+            page_id,
+            MAX_REPLAY_REVISIONS_PER_PAGE,
+        )
+        .await?;
         report.malformed_events += malformed;
         if record.is_some() {
             report.pages_upserted += 1;
@@ -1081,10 +1108,10 @@ impl Db {
 
 mod ingest;
 pub use ingest::{
-    insert_page_event_in_transaction, is_lock_timeout, load_event_in_transaction,
-    lock_page_for_write_in_transaction, parse_page_event_id, parse_page_uuid,
-    soft_delete_page_event_in_transaction, suggestion_state_in_transaction, PageEventDeletion,
-    PageEventRecord, SuggestionState, PAGE_WRITE_LOCK_TIMEOUT_MS,
+    align_recreated_page_in_transaction, insert_page_event_in_transaction, is_lock_timeout,
+    load_event_in_transaction, lock_page_for_write_in_transaction, parse_page_event_id,
+    parse_page_uuid, soft_delete_page_event_in_transaction, suggestion_state_in_transaction,
+    PageEventDeletion, PageEventRecord, SuggestionState, PAGE_WRITE_LOCK_TIMEOUT_MS,
 };
 
 #[cfg(test)]

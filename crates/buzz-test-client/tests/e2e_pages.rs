@@ -501,6 +501,18 @@ async fn no_op_revisions_are_rejected() {
     alice
         .publish(revision(channel, page, "Plan", "body", edit(&r3)))
         .await;
+
+    // A stale `prev` whose text equals its own `prev` is not a no-op (the head is
+    // somewhere else): it is the retryable conflict, so a client that refetches
+    // and retries is not told "nothing to save".
+    let head = alice.history(channel, page).await[0].clone();
+    let message = alice
+        .expect_rejected(revision(channel, page, "Plan renamed", "body", edit(&r2)))
+        .await;
+    assert_eq!(
+        message,
+        format!("conflict: stale prev (head {})", head.id.to_hex())
+    );
 }
 
 /// The 64 KiB content cap is a byte length; the 256-byte title and the blank
@@ -788,6 +800,161 @@ async fn references_must_share_channel_and_page() {
     assert_eq!(ids(&alice.history(c1, p1).await), HashSet::from([r1.id]));
     assert_eq!(ids(&alice.history(c2, p1).await), HashSet::from([twin.id]));
     assert!(alice.exists(x1.id).await);
+}
+
+/// A reference to an event outside the author's own channel must not be an
+/// existence oracle: for an event in a channel the author cannot read (a private
+/// channel's revision, suggestion or chat message), the answer is the same as for
+/// an id that was never stored. Only a channel the author can read is described
+/// ("belongs to a different channel").
+#[tokio::test]
+#[ignore]
+async fn references_do_not_reveal_events_in_channels_the_author_cannot_read() {
+    let url = relay_url();
+    let mut alice = Session::connect(&url).await;
+    let mut mallory = Session::connect(&url).await;
+
+    // Alice's private channel: a page, a suggestion and a chat message.
+    let secret = alice.create_channel("private").await;
+    let secret_page = Uuid::new_v4();
+    let secret_rev = alice
+        .publish(revision(
+            secret,
+            secret_page,
+            "Secret",
+            "one",
+            PageEdit::Create,
+        ))
+        .await;
+    let secret_sug = alice
+        .publish(suggest(secret, secret_page, &secret_rev, "two"))
+        .await;
+    let secret_msg = alice
+        .publish(raw_event(9, &[&["h", &secret.to_string()]], "private chat"))
+        .await;
+
+    // Alice's open channel, readable by Mallory.
+    let shared = alice.create_channel("open").await;
+    let shared_page = Uuid::new_v4();
+    let shared_rev = alice
+        .publish(revision(
+            shared,
+            shared_page,
+            "Shared",
+            "one",
+            PageEdit::Create,
+        ))
+        .await;
+
+    // Mallory writes in her own open channel.
+    let own = mallory.create_channel("open").await;
+    let own_page = Uuid::new_v4();
+    let own_rev = mallory
+        .publish(revision(own, own_page, "Own", "one", PageEdit::Create))
+        .await;
+    let own_sug = mallory
+        .publish(suggest(own, own_page, &own_rev, "proposal"))
+        .await;
+    let ghost = EventId::from_byte_array([7; 32]);
+
+    // Each probe is answered exactly as it is for an id that was never stored. The
+    // frames are kept few (no read-back per probe: the rejection tests above bind
+    // that nothing is stored) because the relay rate-limits one connection.
+    let probes: [(&str, EventId); 3] = [
+        ("revision in a private channel", secret_rev.id),
+        ("suggestion in a private channel", secret_sug.id),
+        ("chat message in a private channel", secret_msg.id),
+    ];
+    type Shape = fn(Uuid, Uuid, &Event, &Event, EventId) -> EventBuilder;
+    let shapes: [(&str, &str, Shape); 5] = [
+        (
+            "prev",
+            "conflict: prev revision not found",
+            |c, p, _, _, id| revision(c, p, "x", "x", PageEdit::Edit { prev: id }),
+        ),
+        ("base", "invalid: base event not found", |c, p, _, _, id| {
+            suggest_base(c, p, id)
+        }),
+        (
+            "suggestion",
+            "invalid: suggestion event not found",
+            |c, p, rev, _, id| {
+                revision(
+                    c,
+                    p,
+                    "x",
+                    "x",
+                    PageEdit::ApplySuggestion {
+                        prev: rev.id,
+                        suggestion: id,
+                    },
+                )
+            },
+        ),
+        ("e", "invalid: e event not found", |c, p, _, _, id| {
+            resolution_of(c, p, id, PageResolution::Rejected)
+        }),
+        ("rev", "invalid: rev event not found", |c, p, _, sug, id| {
+            resolution_of(c, p, sug.id, PageResolution::Accepted { revision: id })
+        }),
+    ];
+    for (tag, never_stored, build) in shapes {
+        let baseline = refused(
+            &mut mallory,
+            build(own, own_page, &own_rev, &own_sug, ghost),
+        )
+        .await;
+        assert_eq!(
+            baseline, never_stored,
+            "{tag}: the answer for an unknown id"
+        );
+        for (what, target) in probes {
+            let message = refused(
+                &mut mallory,
+                build(own, own_page, &own_rev, &own_sug, target),
+            )
+            .await;
+            assert_eq!(message, baseline, "{tag} -> {what}");
+        }
+    }
+
+    // A channel the author can read is still described.
+    let message = refused(
+        &mut mallory,
+        revision(own, own_page, "x", "x", edit(&shared_rev)),
+    )
+    .await;
+    assert_eq!(
+        message,
+        "invalid: prev event belongs to a different channel"
+    );
+}
+
+/// Submit an event that must be rejected and return the relay's message.
+async fn refused(session: &mut Session, builder: EventBuilder) -> String {
+    let reply = session.send(builder).await;
+    assert!(
+        !reply.accepted,
+        "relay accepted an event it must reject (kind {})",
+        reply.event.kind.as_u16()
+    );
+    reply.message
+}
+
+/// A suggestion whose `base` is an arbitrary event id.
+fn suggest_base(channel: Uuid, page: Uuid, base: EventId) -> EventBuilder {
+    build_page_suggestion(channel, page, base, "x").expect("build suggestion")
+}
+
+/// A resolution of an arbitrary event id.
+fn resolution_of(
+    channel: Uuid,
+    page: Uuid,
+    suggestion: EventId,
+    resolution: PageResolution,
+) -> EventBuilder {
+    build_page_suggestion_resolution(channel, page, suggestion, resolution)
+        .expect("build resolution")
 }
 
 /// The suggestion flow: a suggestion never moves the head; a stale base cannot
@@ -1228,6 +1395,70 @@ async fn page_events_fan_out_to_live_subscribers() {
     );
 }
 
+/// Page events of a private channel never reach someone outside it: not as live
+/// events on an unscoped subscription, not in history, not in a COUNT, and not
+/// through a `#d`-only page filter (which carries no `#h` to authorize).
+#[tokio::test]
+#[ignore]
+async fn private_channel_page_events_never_reach_non_members() {
+    let url = relay_url();
+    let mut alice = Session::connect(&url).await;
+    let mut carol = Session::connect(&url).await;
+    let channel = alice.create_channel("private").await;
+    let page = Uuid::new_v4();
+    let all_kinds = [
+        KIND_PAGE_REVISION,
+        KIND_PAGE_SUGGESTION,
+        KIND_PAGE_SUGGESTION_RESOLUTION,
+    ];
+    let kinds_and_page = || {
+        Filter::new()
+            .kinds(all_kinds.iter().map(|k| kind(*k)))
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::D), page.to_string())
+    };
+
+    // Carol watches with no `#h`: the library-style subscription.
+    let watching = sub_id("outsider");
+    carol
+        .ws
+        .subscribe(&watching, vec![kinds_and_page()])
+        .await
+        .expect("subscribe");
+    carol
+        .ws
+        .collect_until_eose(&watching, Duration::from_secs(10))
+        .await
+        .expect("EOSE");
+
+    let r1 = alice
+        .publish(revision(channel, page, "Private", "one", PageEdit::Create))
+        .await;
+    let s1 = alice.publish(suggest(channel, page, &r1, "two")).await;
+    alice
+        .publish(resolve(channel, page, &s1, PageResolution::Rejected))
+        .await;
+
+    // Nothing arrives live.
+    assert!(
+        carol
+            .ws
+            .recv_event(Duration::from_millis(1500))
+            .await
+            .is_err(),
+        "a non-member received a private page event"
+    );
+    // Nothing in history, and the count does not see it either.
+    assert!(carol.query(kinds_and_page()).await.is_empty());
+    assert_eq!(carol.count(kinds_and_page()).await, 0);
+    assert!(carol
+        .query(Filter::new().kind(kind(KIND_PAGE_REVISION)).id(r1.id))
+        .await
+        .is_empty());
+    // The member sees all three, in history and in the count.
+    assert_eq!(alice.query(kinds_and_page()).await.len(), 3);
+    assert_eq!(alice.count(kinds_and_page()).await, 3);
+}
+
 /// Deleting a page event (NIP-09 by its author, kind 9005 by a channel admin)
 /// repairs the page head in the same transaction: the index never names a
 /// deleted revision, and the page is gone once no live revision is left.
@@ -1288,6 +1519,68 @@ async fn deleting_page_events_repairs_the_head() {
         ids(&alice.history(channel, page).await),
         HashSet::from([reborn.id])
     );
+}
+
+/// The index row of a page: `(revision_count, created_by, created_at)`. The index
+/// is internal (no wire read), so this reads the relay's database directly.
+async fn index_row(channel: Uuid, page: Uuid) -> (i32, Vec<u8>, i64) {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url())
+        .await
+        .expect("connect to e2e Postgres");
+    sqlx::query_as::<_, (i32, Vec<u8>, chrono::DateTime<chrono::Utc>)>(
+        "SELECT revision_count, created_by, created_at FROM pages \
+         WHERE channel_id = $1 AND page_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(channel)
+    .bind(page)
+    .fetch_one(&pool)
+    .await
+    .map(|(count, by, at)| (count, by, at.timestamp()))
+    .expect("the page has an index row")
+}
+
+/// Deleting every live revision removes the page's row but keeps the deleted
+/// events; creating the page id anew must leave the row a replay of the whole
+/// history would produce (revision count over every stored revision, creator and
+/// time from the earliest root), and later edits keep it so.
+#[tokio::test]
+#[ignore]
+async fn a_page_created_anew_has_the_row_a_replay_computes() {
+    let url = relay_url();
+    let mut alice = Session::connect(&url).await;
+    let mut bob = Session::connect(&url).await;
+    let channel = alice.create_channel("open").await;
+    let page = Uuid::new_v4();
+    let delete = |target: &Event| {
+        EventBuilder::new(Kind::Custom(5), "").tags([
+            Tag::parse(["h", &channel.to_string()]).unwrap(),
+            Tag::parse(["e", &target.id.to_hex()]).unwrap(),
+        ])
+    };
+
+    let r1 = alice
+        .publish(revision(channel, page, "v1", "one", PageEdit::Create))
+        .await;
+    let r2 = alice
+        .publish(revision(channel, page, "v2", "two", edit(&r1)))
+        .await;
+    alice.publish(delete(&r2)).await;
+    alice.publish(delete(&r1)).await;
+    assert!(alice.history(channel, page).await.is_empty());
+
+    let reborn = bob
+        .publish(revision(channel, page, "again", "again", PageEdit::Create))
+        .await;
+    let (count, created_by, created_at) = index_row(channel, page).await;
+    assert_eq!(count, 3, "deleted revisions still count");
+    assert_eq!(created_by, alice.keys.public_key().to_bytes().to_vec());
+    assert_eq!(created_at, r1.created_at.as_secs() as i64);
+
+    bob.publish(revision(channel, page, "next", "next", edit(&reborn)))
+        .await;
+    assert_eq!(index_row(channel, page).await.0, 4);
 }
 
 /// NIP-PG rule 9: a `#h`-less filter for revisions is scoped to the channels the
