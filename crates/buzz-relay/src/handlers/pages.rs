@@ -152,6 +152,11 @@ fn optional_event_id(event: &Event, name: &'static str) -> Result<Option<[u8; 32
         .transpose()
 }
 
+/// Most tags a page event may carry. Mentions are inserted while the page's
+/// writer lock is held, so an unbounded `p` list would let one member stall
+/// every other writer to the page.
+const MAX_PAGE_TAGS: usize = 100;
+
 /// Apply the stateless NIP-PG rules to a page event.
 ///
 /// Checks the page content cap (byte length), that every tag carrying one value
@@ -168,6 +173,12 @@ pub(crate) fn parse_page_event(event: &Event) -> Result<ParsedPageEvent, String>
         return Err(format!(
             "invalid: page content exceeds maximum size of {MAX_PAGE_CONTENT_BYTES} bytes (got {})",
             event.content.len()
+        ));
+    }
+    if event.tags.len() > MAX_PAGE_TAGS {
+        return Err(format!(
+            "invalid: page event exceeds maximum of {MAX_PAGE_TAGS} tags (got {})",
+            event.tags.len()
         ));
     }
     for name in SINGLE_VALUE_TAGS {
