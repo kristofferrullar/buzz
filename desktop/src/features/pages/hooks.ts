@@ -2,6 +2,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
+import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
+import type { RelayEvent } from "@/shared/api/types";
 import { createTrailingDebounce } from "@/shared/lib/trailingDebounce";
 import {
   fetchPageDetail,
@@ -10,7 +12,11 @@ import {
   type PageDetailResult,
   type PagesLibrary,
 } from "./lib/pageFetch";
-import { PAGE_EVENT_KINDS } from "./lib/pageModel";
+import {
+  buildPageLiveFilters,
+  emptyPageRefresh,
+  notePageEvent,
+} from "./lib/pageLive";
 
 /**
  * Query keys for pages, always scoped by community. The app also remounts its
@@ -77,50 +83,92 @@ export function usePageQuery(
  * Keep every page query for the community current while the Space screen is
  * mounted.
  *
- * Page events are regular events, so a live REQ for the three page kinds (no
- * channel tag: the relay scopes it to channels the viewer can read) tells us
- * *that* something changed; the bounded reads above remain the single source of
- * truth for *what* the pages now are. Three triggers invalidate them:
+ * Page events are regular, channel-scoped events, so a live REQ per chunk of
+ * the viewer's channels (`#h`; see `pageLive.ts` for why a global REQ would
+ * hear nothing) tells us *that* something changed; the bounded reads above
+ * remain the single source of truth for *what* the pages now are. Three
+ * triggers invalidate them:
  *
- * - a live page event (debounced, so a burst is one refetch);
- * - the live REQ becoming ready, which closes the gap between a one-shot history
+ * - a live page event (debounced, so a burst is one refetch of just what it can
+ *   have changed: the library for a revision, the event's own page view);
+ * - a live REQ becoming ready, which closes the gap between a one-shot history
  *   read and the subscription starting: anything published before the
  *   subscription registered is in the refetch, anything after arrives live;
  * - a relay reconnect, which can have dropped events.
+ *
+ * Pages in a channel outside `channelIds` (an open channel the viewer has not
+ * joined) get no push; every refetch and the backstop poll still read them.
  */
-export function usePagesLiveUpdates(communityId: string | null): void {
+export function usePagesLiveUpdates(
+  communityId: string | null,
+  channelIds: readonly string[],
+): void {
   const queryClient = useQueryClient();
+  // Content-keyed so a re-render with an equal channel set never resubscribes.
+  const filtersKey = React.useMemo(
+    () => JSON.stringify(buildPageLiveFilters(channelIds)),
+    [channelIds],
+  );
 
   React.useEffect(() => {
     if (communityId === null) return;
+    const filters = JSON.parse(filtersKey) as RelaySubscriptionFilter[];
     let disposed = false;
-    let unsubscribe: (() => Promise<void>) | null = null;
+    const disposers: Array<() => Promise<void>> = [];
 
     const invalidate = () => {
+      if (disposed) return;
       void queryClient.invalidateQueries({
         queryKey: pagesQueryKeys.all(communityId),
       });
     };
-    const debounced = createTrailingDebounce(
-      invalidate,
-      LIVE_REFRESH_DEBOUNCE_MS,
-    );
+    // A burst of live events collapses into one flush that re-reads only what
+    // the events can have changed (see `PageRefresh`).
+    let pending = emptyPageRefresh();
+    const flush = () => {
+      const refresh = pending;
+      pending = emptyPageRefresh();
+      if (refresh.everything) {
+        invalidate();
+        return;
+      }
+      if (disposed) return;
+      if (refresh.library) {
+        void queryClient.invalidateQueries({
+          queryKey: pagesQueryKeys.library(communityId),
+        });
+      }
+      for (const { channelId, pageId } of refresh.pages.values()) {
+        void queryClient.invalidateQueries({
+          queryKey: pagesQueryKeys.page(communityId, channelId, pageId),
+        });
+      }
+    };
+    const debounced = createTrailingDebounce(flush, LIVE_REFRESH_DEBOUNCE_MS);
+    const onLiveEvent = (event: RelayEvent) => {
+      notePageEvent(pending, event);
+      debounced.trigger();
+    };
+    // Several chunks become ready within moments of each other; one refresh
+    // covers them all instead of restarting the refetch once per chunk.
+    const onReady = () => {
+      pending.everything = true;
+      debounced.trigger();
+    };
 
-    void relayClient
-      .subscribeLive(
-        { kinds: [...PAGE_EVENT_KINDS], limit: 0 },
-        debounced.trigger,
-        invalidate,
-      )
-      .then((dispose) => {
-        if (disposed) void dispose();
-        else unsubscribe = dispose;
-      })
-      .catch((error) => {
-        // Not fatal and not silent: the backstop poll keeps pages current, and
-        // a relay reconnect invalidates the page queries below.
-        console.error("Couldn't subscribe to live page updates", error);
-      });
+    for (const filter of filters) {
+      relayClient
+        .subscribeLive(filter, onLiveEvent, onReady)
+        .then((dispose) => {
+          if (disposed) void dispose();
+          else disposers.push(dispose);
+        })
+        .catch((error) => {
+          // Not fatal and not silent: the backstop poll keeps pages current,
+          // and a relay reconnect invalidates the page queries below.
+          console.error("Couldn't subscribe to live page updates", error);
+        });
+    }
 
     const unsubscribeReconnect = relayClient.subscribeToReconnects(invalidate);
 
@@ -128,7 +176,7 @@ export function usePagesLiveUpdates(communityId: string | null): void {
       disposed = true;
       debounced.cancel();
       unsubscribeReconnect();
-      if (unsubscribe) void unsubscribe();
+      for (const dispose of disposers) void dispose();
     };
-  }, [communityId, queryClient]);
+  }, [communityId, filtersKey, queryClient]);
 }

@@ -1279,6 +1279,11 @@ declare global {
       kind: number;
     }) => boolean;
     __BUZZ_E2E_HAS_MOCK_GLOBAL_KIND_SUBSCRIPTION__?: (kind: number) => boolean;
+    /** True iff a live REQ lists this channel in `#h`; a global REQ never counts. */
+    __BUZZ_E2E_HAS_MOCK_CHANNEL_SCOPED_SUBSCRIPTION__?: (input: {
+      channelName: string;
+      kind: number;
+    }) => boolean;
     __BUZZ_E2E_SET_MOCK_USER_STATUS__?: (input: {
       text: string;
       emoji?: string;
@@ -5091,6 +5096,38 @@ function hasMockLiveSubscription(channelId: string, kind?: number) {
     }
   }
 
+  return false;
+}
+
+/**
+ * The relay never delivers a channel-scoped event to a global (`#h`-less) live
+ * REQ: only subscriptions that name the channel in `#h` receive it. The mock's
+ * general emitter is more generous, so channel-scoped page events use these.
+ */
+function emitMockChannelScopedEvent(channelId: string, event: RelayEvent) {
+  for (const socket of mockSockets.values()) {
+    for (const [subId, subscription] of socket.subscriptions) {
+      if (
+        subscription.channelIds.includes(channelId) &&
+        (!subscription.kinds || subscription.kinds.includes(event.kind))
+      ) {
+        sendWsText(socket.handler, ["EVENT", subId, event]);
+      }
+    }
+  }
+}
+
+function hasMockChannelScopedSubscription(channelId: string, kind: number) {
+  for (const socket of mockSockets.values()) {
+    for (const subscription of socket.subscriptions.values()) {
+      if (
+        subscription.channelIds.includes(channelId) &&
+        (!subscription.kinds || subscription.kinds.includes(kind))
+      ) {
+        return true;
+      }
+    }
+  }
   return false;
 }
 
@@ -11650,6 +11687,18 @@ export function maybeInstallE2eTauriMocks() {
   }) => hasMockOwnerKindSubscription(ownerPubkey, kind);
   window.__BUZZ_E2E_HAS_MOCK_GLOBAL_KIND_SUBSCRIPTION__ = (kind) =>
     hasMockLiveSubscription(GLOBAL_MOCK_SUBSCRIPTION, kind);
+  window.__BUZZ_E2E_HAS_MOCK_CHANNEL_SCOPED_SUBSCRIPTION__ = ({
+    channelName,
+    kind,
+  }) => {
+    const channel = mockChannels.find(
+      (candidate) => candidate.name === channelName,
+    );
+    if (!channel) {
+      throw new Error(`Mock channel ${channelName} not found.`);
+    }
+    return hasMockChannelScopedSubscription(channel.id, kind);
+  };
   window.__BUZZ_E2E_EMIT_MOCK_PRESENCE__ = ({ pubkey, status }) => {
     const author = pubkey.toLowerCase();
     setMockPresenceStatus(author, status);
@@ -11669,11 +11718,8 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_PUSH_MOCK_PAGE_EVENT__ = (pageEvent) => {
     mockPageStore.push(pageEvent);
-    emitMockLiveEvent(
-      pageEvent.tags.find((tag) => tag[0] === "h")?.[1] ??
-        GLOBAL_MOCK_SUBSCRIPTION,
-      pageEvent,
-    );
+    const channelId = pageEvent.tags.find((tag) => tag[0] === "h")?.[1];
+    if (channelId) emitMockChannelScopedEvent(channelId, pageEvent);
   };
   window.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ = (item) => {
     const category = item.category === "mention" ? "mentions" : item.category;

@@ -451,6 +451,73 @@ test("history is newest first, marks the head, and flags revisions off the head 
   assert.equal(detail.createdAt, 100);
 });
 
+test("revisions made in one second are listed causally, newest first, whatever their ids say", () => {
+  const order = (ids) => {
+    // root (earlier second) <- a <- b <- c, all three edits in the same second.
+    const [a, b, c] = ids;
+    const detail = buildPageDetail({ channelId: H, pageId: D }, [
+      revision({ id: hex("0"), createdAt: 100 }),
+      revision({ id: a, prev: hex("0"), createdAt: 200 }),
+      revision({ id: b, prev: a, createdAt: 200 }),
+      revision({ id: c, prev: b, createdAt: 200 }),
+    ]);
+    return detail.history.map((entry) => entry.revision.id);
+  };
+  // Ascending ids: a plain id tie-break would list the oldest edit first and
+  // bury the head under it.
+  assert.deepEqual(order([hex("1"), hex("2"), hex("3")]), [
+    hex("3"),
+    hex("2"),
+    hex("1"),
+    hex("0"),
+  ]);
+  // Descending ids, and a mixed order, must give the same causal answer.
+  assert.deepEqual(order([hex("9"), hex("8"), hex("7")]), [
+    hex("7"),
+    hex("8"),
+    hex("9"),
+    hex("0"),
+  ]);
+  assert.deepEqual(order([hex("5"), hex("e"), hex("2")]), [
+    hex("2"),
+    hex("e"),
+    hex("5"),
+    hex("0"),
+  ]);
+});
+
+test("the head is the first history row when its same-second ancestors have lower ids", () => {
+  const detail = buildPageDetail({ channelId: H, pageId: D }, [
+    revision({ id: hex("1"), createdAt: 200 }),
+    revision({ id: hex("2"), prev: hex("1"), createdAt: 200 }),
+  ]);
+  assert.equal(detail.head.id, hex("2"));
+  assert.equal(detail.history[0].revision.id, hex("2"));
+  assert.equal(detail.history[0].isHead, true);
+});
+
+test("same-second siblings on different branches fall back to depth, then the lowest id", () => {
+  const detail = buildPageDetail({ channelId: H, pageId: D }, [
+    revision({ id: hex("1"), createdAt: 100 }),
+    revision({ id: hex("a"), prev: hex("1"), createdAt: 200 }),
+    revision({ id: hex("b"), prev: hex("1"), createdAt: 200 }),
+    revision({ id: hex("c"), prev: hex("b"), createdAt: 200 }),
+  ]);
+  assert.deepEqual(
+    detail.history.map((entry) => entry.revision.id),
+    // c is built on b (deeper) so it leads; a and b are equally deep: lowest id.
+    [hex("c"), hex("a"), hex("b"), hex("1")],
+  );
+});
+
+test("history ordering survives a corrupt prev cycle instead of looping", () => {
+  const detail = buildPageDetail({ channelId: H, pageId: D }, [
+    revision({ id: hex("1"), prev: hex("2"), createdAt: 200 }),
+    revision({ id: hex("2"), prev: hex("1"), createdAt: 200 }),
+  ]);
+  assert.equal(detail.history.length, 2);
+});
+
 test("with several roots the creator is the earliest root, ties to the lowest event id", () => {
   const detail = (events) =>
     buildPageDetail({ channelId: H, pageId: D }, events);

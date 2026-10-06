@@ -33,9 +33,13 @@ export function PagesScreen({
   selection,
   useAuthorLabels,
 }: PagesScreenProps) {
-  usePagesLiveUpdates(communityId);
-
   const { channels } = useChannelNavigation();
+  const channelIds = React.useMemo(
+    () => channels.map((channel) => channel.id),
+    [channels],
+  );
+  usePagesLiveUpdates(communityId, channelIds);
+
   // Viewers who can write nowhere are never offered a create control.
   const canCreate = React.useMemo(
     () => listWritableChannels(channels).length > 0,

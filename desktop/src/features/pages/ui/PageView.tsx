@@ -128,6 +128,7 @@ export function PageView({
               detail={detail}
               historyTruncated={query.data?.truncated === true}
               loadLatestHead={loadLatestHead}
+              suggestionsTruncated={query.data?.suggestionsTruncated === true}
               useAuthorLabels={useAuthorLabels}
             />
           </>
@@ -156,6 +157,7 @@ type PageDetailBodyProps = Pick<
   detail: PageDetail;
   historyTruncated: boolean;
   loadLatestHead: () => Promise<PageRevision | null>;
+  suggestionsTruncated: boolean;
 };
 
 const OUTCOME_MESSAGES: Record<PageEditorOutcome, string> = {
@@ -175,6 +177,7 @@ function PageDetailBody({
   detail,
   historyTruncated,
   loadLatestHead,
+  suggestionsTruncated,
   useAuthorLabels,
 }: PageDetailBodyProps) {
   const { channels, nonDmChannelNames } = useChannelNavigation();
@@ -400,6 +403,7 @@ function PageDetailBody({
             onReview={setReviewingId}
             reviewingId={reviewing?.suggestion.id ?? null}
             suggestions={detail.suggestions}
+            truncated={suggestionsTruncated}
           />
           <HistorySection
             authorLabel={authorLabel}

@@ -409,11 +409,16 @@ test("revisions published while Space is open arrive live", async ({
       },
     );
 
-  // Wait for the live REQ so the push is not lost to a startup race.
+  // Wait for a live REQ that names the channel in `#h`, so the push is not
+  // lost to a startup race. The relay never delivers a channel-scoped event to
+  // a global (`#h`-less) REQ, so a global subscription must not count here.
   await expect
     .poll(() =>
       page.evaluate(() =>
-        window.__BUZZ_E2E_HAS_MOCK_GLOBAL_KIND_SUBSCRIPTION__?.(52000),
+        window.__BUZZ_E2E_HAS_MOCK_CHANNEL_SCOPED_SUBSCRIPTION__?.({
+          channelName: "engineering",
+          kind: 52000,
+        }),
       ),
     )
     .toBe(true);

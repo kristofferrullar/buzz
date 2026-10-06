@@ -63,7 +63,10 @@ async function waitForLiveSubscription(page: Page) {
   await expect
     .poll(() =>
       page.evaluate(() =>
-        window.__BUZZ_E2E_HAS_MOCK_GLOBAL_KIND_SUBSCRIPTION__?.(52000),
+        window.__BUZZ_E2E_HAS_MOCK_CHANNEL_SCOPED_SUBSCRIPTION__?.({
+          channelName: "general",
+          kind: 52000,
+        }),
       ),
     )
     .toBe(true);

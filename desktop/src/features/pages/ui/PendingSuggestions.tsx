@@ -24,6 +24,8 @@ type PendingSuggestionsProps = {
   onReview: (suggestionId: string | null) => void;
   reviewingId: string | null;
   suggestions: readonly SuggestionState[];
+  /** The suggestion read stopped at its bound: the list may omit older ones. */
+  truncated?: boolean;
 };
 
 /**
@@ -47,6 +49,7 @@ export function PendingSuggestions({
   onReview,
   reviewingId,
   suggestions,
+  truncated = false,
 }: PendingSuggestionsProps) {
   const headingId = React.useId();
   const pending = suggestions.filter((state) => state.closed === null);
@@ -91,6 +94,14 @@ export function PendingSuggestions({
           ))}
         </ul>
       )}
+      {truncated ? (
+        <p
+          className="text-sm text-muted-foreground"
+          data-testid="page-suggestions-truncated"
+        >
+          Older suggestions aren&rsquo;t shown.
+        </p>
+      ) : null}
     </section>
   );
 }

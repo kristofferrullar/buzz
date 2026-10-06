@@ -74,12 +74,68 @@ export function pageKey({ channelId, pageId }: PageIdentity): string {
   return JSON.stringify([channelId, pageId]);
 }
 
-/** Newest first; equal timestamps order by ascending event id (relay order). */
+/**
+ * Newest first; equal timestamps order by ascending event id (relay order).
+ * That is not causal: order revisions with {@link sortRevisionsNewestFirst}.
+ */
 export function compareNewestFirst(
   left: { createdAt: number; id: string },
   right: { createdAt: number; id: string },
 ): number {
   return right.createdAt - left.createdAt || left.id.localeCompare(right.id);
+}
+
+/**
+ * Links followed along `prev` from each revision to the chain's root (0 for a
+ * root, or for a revision whose `prev` is outside `revisions`). A revision is
+ * always deeper than the revision it was built on.
+ */
+function chainDepths(revisions: readonly PageRevision[]): Map<string, number> {
+  const byId = new Map(revisions.map((revision) => [revision.id, revision]));
+  const depths = new Map<string, number>();
+  for (const start of revisions) {
+    // Walk to the first revision whose depth is known (or off the window's
+    // edge), then number the walked stretch back down. `seen` guards a corrupt
+    // cycle; real event ids are hashes and cannot form one.
+    const stretch: string[] = [];
+    const seen = new Set<string>();
+    let cursor: PageRevision | undefined = start;
+    while (cursor && !depths.has(cursor.id) && !seen.has(cursor.id)) {
+      seen.add(cursor.id);
+      stretch.push(cursor.id);
+      cursor = cursor.prev ? byId.get(cursor.prev) : undefined;
+    }
+    let depth = cursor ? (depths.get(cursor.id) ?? -1) : -1;
+    for (let index = stretch.length - 1; index >= 0; index -= 1) {
+      depth += 1;
+      depths.set(stretch[index], depth);
+    }
+  }
+  return depths;
+}
+
+/**
+ * Revisions newest first, causal inside one second.
+ *
+ * The relay breaks `created_at` ties by event id, which says nothing about which
+ * of two same-second revisions was built on the other, and an agent's quick
+ * successive edits routinely share a second. A plain id tie-break can therefore
+ * list an older revision above the one built on it (even above the head).
+ * Within one second a revision is listed before the revision it was built on
+ * (deeper `prev` chain first); remaining ties fall back to the lowest event id.
+ * This is the same order the CLI prints (`buzz pages history`).
+ */
+export function sortRevisionsNewestFirst(
+  revisions: readonly PageRevision[],
+): PageRevision[] {
+  const depths = chainDepths(revisions);
+  const depthOf = (revision: PageRevision) => depths.get(revision.id) ?? 0;
+  return [...revisions].sort(
+    (left, right) =>
+      right.createdAt - left.createdAt ||
+      depthOf(right) - depthOf(left) ||
+      compareNewestFirst(left, right),
+  );
 }
 
 function singleTagValue(tags: string[][], name: string): string | null {
@@ -382,7 +438,7 @@ export function buildPageDetail(
   const head = selectHead(revisions);
   if (!head) return null;
   const chain = headChainIds(revisions, head);
-  const history = [...revisions].sort(compareNewestFirst).map((revision) => ({
+  const history = sortRevisionsNewestFirst(revisions).map((revision) => ({
     revision,
     isHead: revision.id === head.id,
     onHeadChain: chain.has(revision.id),
