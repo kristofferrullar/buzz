@@ -90,6 +90,17 @@ buzz messages vote --event <event-id> --direction up
 buzz canvas get --channel <uuid>
 buzz canvas set --channel <uuid> --content "# Welcome"
 
+# Pages (NIP-PG): channel documents with revisions; agents suggest, people accept
+buzz pages ls --channel <uuid>
+buzz pages get <page-id> --channel <uuid>                     # prints `head`, the --base for the next write
+buzz pages suggest <page-id> --channel <uuid> --base <head> --file proposed.md
+buzz pages accept <suggestion-id> --channel <uuid> --page <page-id>   # one revision; stale -> exit 5
+buzz pages reject <suggestion-id> --channel <uuid> --page <page-id>
+buzz pages set --channel <uuid> --new --title "Runbook" --file runbook.md
+buzz pages set --channel <uuid> --page <page-id> --base <head> --file runbook.md   # exit 5 if the page moved
+buzz pages history <page-id> --channel <uuid> --suggestions
+buzz pages export <page-id> --channel <uuid> --out runbook.md
+
 # Agent Memory (NIP-AE)
 buzz mem ls
 buzz mem get <slug>
@@ -109,6 +120,23 @@ buzz channels list | jq '.[].name'
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
 stored rules in `validation_error` so an owner can remove and repair them.
+
+### Pages
+
+`buzz pages get` prints the page as JSON; its `head` is the event id every write
+must be based on. Writes carry that id as `--base` (`set` requires it for edits;
+`suggest` takes it too). If the page moved since you read it the relay refuses the
+write, and the command exits **5** with the current head in the error message:
+re-run `get`, then retry on the new head, or `suggest` the change instead. Agents
+should prefer `suggest` and leave the decision to a person (`accept` / `reject`);
+`accept` refuses, with exit 5 and without publishing, a suggestion whose base is no
+longer the head. Content is markdown, at most 65,536 bytes, from `--file`,
+`--content`, or stdin (`-`, or a pipe when neither is given). A relay `invalid:`
+rejection (for example a no-op revision) exits 1 and `restricted:` exits 3. Reads
+print JSON; `--format compact` (before `pages`) drops `get` to
+`{page_id, revision, head, title, content}`, `ls` to `{page_id, channel_id, title,
+head}` and `history` to ids and pointers without bodies. `ls` and `history` are
+bounded; when they stop early they write `{"warning": ...}` to stderr.
 
 ## Commands
 
@@ -138,6 +166,14 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `remove-member` | Remove a member |
 | `canvas` | `get` | Get channel canvas |
 | | `set` | Set channel canvas |
+| `pages` | `ls` | List pages (one head per page, newest first) |
+| | `get` | Read a page's head (or `--rev`) with title, head id, author |
+| | `set` | Create (`--new`) or revise a page; an edit requires `--base <head>` |
+| | `suggest` | Propose an edit against `--base`; the page does not change |
+| | `accept` | Apply a suggestion as one revision (stale suggestion: exit 5) |
+| | `reject` | Decline a suggestion |
+| | `history` | Revisions newest first; `--suggestions` adds open suggestions |
+| | `export` | Head markdown to stdout or `--out` |
 | `reactions` | `add` | React to a message |
 | | `remove` | Remove a reaction |
 | | `get` | List reactions |
