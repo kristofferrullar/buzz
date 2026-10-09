@@ -62,11 +62,50 @@ export type MockPageAuthors = {
   viewer: string;
 };
 
+/** Tauri commands the desktop uses to publish page events (the TS-to-Rust contract). */
+export const MOCK_PAGE_WRITE_COMMANDS: ReadonlySet<string> = new Set([
+  "publish_page_revision",
+  "publish_page_suggestion",
+  "reject_page_suggestion",
+]);
+
+/**
+ * A one-shot fault a spec arms (`window.__BUZZ_E2E_PAGE_WRITE_FAULT__`) to make
+ * the next write fail the way the relay can:
+ *
+ * - `concurrent-revision`: another author's revision lands on the head just
+ *   before the write is processed, and the viewer is *not* told (no live
+ *   event), so the write loses the compare-and-swap exactly like a real race.
+ * - `reject`: the relay refuses the write with this text.
+ * - `delay`: the relay answers after `ms`, so specs can observe the in-flight state.
+ */
+export type MockPageWriteFault =
+  | { kind: "concurrent-revision"; content: string; title?: string }
+  | { kind: "reject"; message: string }
+  | { kind: "delay"; ms: number };
+
+export type MockPageWriteContext = {
+  fault?: MockPageWriteFault | null;
+  nowSeconds?: number;
+  viewerPubkey: string;
+};
+
 export type MockPageStore = {
   /** Answer a REQ filter the way the relay answers a page query. */
   query: (filter: MockPageFilter) => RelayEvent[];
   /** Store an event so later queries return it. */
   push: (event: RelayEvent) => void;
+  /**
+   * Handle a page write command the way the relay's ingest does: the same
+   * checks, in the same order, with the same rejection text, storing nothing
+   * when it rejects. Returns the stored event; throws `relay rejected event: ...`
+   * (what the Tauri layer reports) otherwise.
+   */
+  publish: (
+    command: string,
+    args: Record<string, unknown>,
+    context: MockPageWriteContext,
+  ) => RelayEvent;
 };
 
 export type MockPageFilter = {
@@ -319,13 +358,247 @@ function hasTag(event: RelayEvent, name: string, values: string[]): boolean {
   return event.tags.some((tag) => tag[0] === name && values.includes(tag[1]));
 }
 
+function tagValue(event: RelayEvent, name: string): string | undefined {
+  return event.tags.find((tag) => tag[0] === name)?.[1];
+}
+
+const textEncoder = new TextEncoder();
+const MOCK_MAX_TITLE_BYTES = 256;
+const MOCK_MAX_CONTENT_BYTES = 64 * 1024;
+
+/** Channels whose pages the mock viewer can read but not write (not a member). */
+const MOCK_READ_ONLY_CHANNEL_IDS: ReadonlySet<string> = new Set([
+  MOCK_PAGE_CHANNEL_IDS.design,
+]);
+
+function randomEventId(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
+}
+
+/**
+ * A page's head: the tip of its revision chain with the greatest `created_at`,
+ * ties to the lowest id (NIP-PG "Rebuild Invariant"). Kept independent of the
+ * production model on purpose, so the mock does not share its bugs.
+ */
+function currentHead(
+  events: readonly RelayEvent[],
+  channelId: string,
+  pageId: string,
+): RelayEvent | null {
+  const revisions = events.filter(
+    (candidate) =>
+      candidate.kind === KIND_PAGE_REVISION &&
+      tagValue(candidate, "h") === channelId &&
+      tagValue(candidate, "d") === pageId,
+  );
+  const referenced = new Set(
+    revisions.map((revision) => tagValue(revision, "prev")),
+  );
+  const tips = revisions
+    .filter((revision) => !referenced.has(revision.id))
+    .sort(
+      (left, right) =>
+        right.created_at - left.created_at || left.id.localeCompare(right.id),
+    );
+  return tips[0] ?? null;
+}
+
 /** Create the in-memory page store the bridge answers REQs from. */
 export function createMockPageStore(
   authors: MockPageAuthors,
   nowSeconds: number = Math.floor(Date.now() / 1000),
 ): MockPageStore {
   const events = createMockPageEvents(authors, nowSeconds);
+
+  const find = (id: string, kind: number, h: string, d: string) =>
+    events.find(
+      (candidate) =>
+        candidate.id === id &&
+        candidate.kind === kind &&
+        tagValue(candidate, "h") === h &&
+        tagValue(candidate, "d") === d,
+    );
+  /** Closed per NIP-PG: a resolution references it, or a revision applied it. */
+  const closure = (suggestionId: string): "resolved" | "applied" | null => {
+    if (
+      events.some(
+        (candidate) =>
+          candidate.kind === KIND_PAGE_SUGGESTION_RESOLUTION &&
+          tagValue(candidate, "e") === suggestionId,
+      )
+    ) {
+      return "resolved";
+    }
+    return events.some(
+      (candidate) =>
+        candidate.kind === KIND_PAGE_REVISION &&
+        tagValue(candidate, "suggestion") === suggestionId,
+    )
+      ? "applied"
+      : null;
+  };
+
+  const publish: MockPageStore["publish"] = (command, args, context) => {
+    const reject = (message: string): never => {
+      throw new Error(`relay rejected event: ${message}`);
+    };
+    const channelId = String(args.channelId ?? "");
+    const pageId = String(args.pageId ?? "");
+    const now = context.nowSeconds ?? Math.floor(Date.now() / 1000);
+    const fault = context.fault ?? null;
+
+    if (fault?.kind === "reject") reject(fault.message);
+    if (MOCK_READ_ONLY_CHANNEL_IDS.has(channelId)) {
+      reject("restricted: not a channel member");
+    }
+    if (fault?.kind === "concurrent-revision") {
+      const head = currentHead(events, channelId, pageId);
+      if (head) {
+        // Lands silently: the viewer's UI has not heard of it, so the write
+        // below races it and loses, like a real concurrent save.
+        events.push(
+          revision({
+            authorPubkey: authors.alice,
+            channelId,
+            content: fault.content,
+            createdAt: Math.max(now, head.created_at + 1),
+            id: randomEventId(),
+            pageId,
+            prev: head.id,
+            title: fault.title ?? tagValue(head, "title") ?? "Untitled",
+          }),
+        );
+      }
+    }
+
+    const head = currentHead(events, channelId, pageId);
+    const createdAt = Math.max(now, head?.created_at ?? 0);
+    let stored: RelayEvent;
+
+    if (command === "publish_page_revision") {
+      const title = String(args.title ?? "");
+      const content = String(args.content ?? "");
+      const prev = typeof args.prev === "string" ? args.prev : null;
+      const suggestionId =
+        typeof args.suggestion === "string" ? args.suggestion : null;
+
+      if (title.trim().length === 0) reject("invalid: page title is blank");
+      if (textEncoder.encode(title).length > MOCK_MAX_TITLE_BYTES) {
+        reject(`invalid: page title exceeds ${MOCK_MAX_TITLE_BYTES} bytes`);
+      }
+      const contentBytes = textEncoder.encode(content).length;
+      if (contentBytes > MOCK_MAX_CONTENT_BYTES) {
+        reject(
+          `invalid: page content exceeds maximum size of ${MOCK_MAX_CONTENT_BYTES} bytes (got ${contentBytes})`,
+        );
+      }
+      if (prev === null) {
+        if (head) {
+          reject(`conflict: page already exists (head ${head.id})`);
+        }
+      } else {
+        if (!head) reject("conflict: page does not exist");
+        if (head && head.id !== prev) {
+          reject(`conflict: stale prev (head ${head.id})`);
+        }
+      }
+      if (suggestionId !== null) {
+        const target = find(
+          suggestionId,
+          KIND_PAGE_SUGGESTION,
+          channelId,
+          pageId,
+        );
+        if (!target) reject("invalid: suggestion event not found");
+        if (closure(suggestionId) !== null) {
+          reject("conflict: suggestion is already closed");
+        }
+        if (target && tagValue(target, "base") !== prev) {
+          reject(
+            "conflict: suggestion is stale (its base is not the revision's prev)",
+          );
+        }
+      }
+      if (
+        head &&
+        tagValue(head, "title") === title &&
+        head.content === content
+      ) {
+        reject(
+          "invalid: no-op revision (title and content equal the page head)",
+        );
+      }
+      stored = revision({
+        authorPubkey: context.viewerPubkey,
+        channelId,
+        content,
+        createdAt,
+        id: randomEventId(),
+        pageId,
+        prev: prev ?? undefined,
+        suggestion: suggestionId ?? undefined,
+        title,
+      });
+    } else if (command === "publish_page_suggestion") {
+      const content = String(args.content ?? "");
+      const base = String(args.base ?? "");
+      const contentBytes = textEncoder.encode(content).length;
+      if (contentBytes > MOCK_MAX_CONTENT_BYTES) {
+        reject(
+          `invalid: page content exceeds maximum size of ${MOCK_MAX_CONTENT_BYTES} bytes (got ${contentBytes})`,
+        );
+      }
+      if (!find(base, KIND_PAGE_REVISION, channelId, pageId)) {
+        reject("invalid: base event not found");
+      }
+      stored = suggestion({
+        authorPubkey: context.viewerPubkey,
+        base,
+        channelId,
+        content,
+        createdAt: now,
+        id: randomEventId(),
+        pageId,
+      });
+    } else if (command === "reject_page_suggestion") {
+      const target = String(args.suggestion ?? "");
+      if (!find(target, KIND_PAGE_SUGGESTION, channelId, pageId)) {
+        reject("invalid: e event not found");
+      }
+      const closed = closure(target);
+      if (closed === "resolved") {
+        reject("conflict: suggestion is already resolved");
+      }
+      if (closed === "applied") {
+        reject("conflict: suggestion is already applied");
+      }
+      stored = event(
+        randomEventId(),
+        KIND_PAGE_SUGGESTION_RESOLUTION,
+        context.viewerPubkey,
+        now,
+        [
+          ["h", channelId],
+          ["d", pageId],
+          ["e", target],
+          ["status", "rejected"],
+        ],
+        "",
+      );
+    } else {
+      return reject(`invalid: unknown page write ${command}`);
+    }
+
+    events.push(stored);
+    return stored;
+  };
+
   return {
+    publish,
     push: (next) => {
       if (!events.some((existing) => existing.id === next.id)) {
         events.push(next);

@@ -1,4 +1,4 @@
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Pencil } from "lucide-react";
 import * as React from "react";
 
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
@@ -8,10 +8,18 @@ import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { Markdown } from "@/shared/ui/markdown";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { usePageQuery } from "../hooks";
-import type { PageDetail } from "../lib/pageModel";
+import { channelLabelFor, isChannelWritable } from "../lib/channelWrite";
+import type { PageDetail, PageRevision } from "../lib/pageModel";
 import type { PageSelection, PagesHostBindings } from "../types";
+import { PageEditor } from "./PageEditor";
 import { PageHistoryList } from "./PageHistoryList";
 import { PendingSuggestions } from "./PendingSuggestions";
+import { SuggestionReview } from "./SuggestionReview";
+import type { PageEditorOutcome } from "./usePageEditor";
+import {
+  type SuggestionDecision,
+  useSuggestionDecisions,
+} from "./useSuggestionDecisions";
 
 type PageViewProps = PagesHostBindings & {
   communityId: string | null;
@@ -20,13 +28,15 @@ type PageViewProps = PagesHostBindings & {
 };
 
 /**
- * A single page, read-only: rendered markdown, metadata, revision history
- * (selecting a revision shows its content) and pending suggestions.
+ * A single page: rendered markdown, metadata, revision history (selecting a
+ * revision shows its content), pending suggestions with accept and reject, and
+ * for writers an editor.
  *
- * Mount with `key` set to the page identity so the selected revision never
- * carries over from one page to another.
+ * Mount with `key` set to the page identity so the selected revision and an open
+ * editor never carry over from one page to another.
  */
 export function PageView({
+  DiffViewer,
   communityId,
   onBack,
   selection,
@@ -38,6 +48,7 @@ export function PageView({
     selection.pageId,
   );
   const detail = query.data?.detail ?? null;
+  const { refetch } = query;
 
   // Opening a page moves focus to its first control, so keyboard and
   // screen-reader users land in the new view instead of on a removed row.
@@ -45,6 +56,18 @@ export function PageView({
   React.useEffect(() => {
     backRef.current?.focus();
   }, []);
+
+  /**
+   * The freshest head after a refetch, or `null` if the read failed. A failed
+   * read must not look like "the head is unchanged": the editor would rebase
+   * onto stale data and the next save would conflict again, silently.
+   */
+  const loadLatestHead =
+    React.useCallback(async (): Promise<PageRevision | null> => {
+      const result = await refetch();
+      if (result.isError) return null;
+      return result.data?.detail?.head ?? null;
+    }, [refetch]);
 
   return (
     <div
@@ -100,8 +123,11 @@ export function PageView({
               </p>
             ) : null}
             <PageDetailBody
+              DiffViewer={DiffViewer}
+              communityId={communityId}
               detail={detail}
               historyTruncated={query.data?.truncated === true}
+              loadLatestHead={loadLatestHead}
               suggestionsTruncated={query.data?.suggestionsTruncated === true}
               useAuthorLabels={useAuthorLabels}
             />
@@ -123,15 +149,34 @@ export function PageView({
   );
 }
 
-type PageDetailBodyProps = Pick<PagesHostBindings, "useAuthorLabels"> & {
+type PageDetailBodyProps = Pick<
+  PagesHostBindings,
+  "DiffViewer" | "useAuthorLabels"
+> & {
+  communityId: string | null;
   detail: PageDetail;
   historyTruncated: boolean;
+  loadLatestHead: () => Promise<PageRevision | null>;
   suggestionsTruncated: boolean;
 };
 
+const OUTCOME_MESSAGES: Record<PageEditorOutcome, string> = {
+  create: "Page created.",
+  save: "Revision saved.",
+  suggest: "Suggestion sent for review.",
+};
+
+const DECISION_MESSAGES: Record<SuggestionDecision, string> = {
+  accept: "Suggestion accepted. The page now has its changes.",
+  reject: "Suggestion rejected.",
+};
+
 function PageDetailBody({
+  DiffViewer,
+  communityId,
   detail,
   historyTruncated,
+  loadLatestHead,
   suggestionsTruncated,
   useAuthorLabels,
 }: PageDetailBodyProps) {
@@ -139,6 +184,10 @@ function PageDetailBody({
   const [selectedRevisionId, setSelectedRevisionId] = React.useState<
     string | null
   >(null);
+  const [editing, setEditing] = React.useState(false);
+  const [reviewingId, setReviewingId] = React.useState<string | null>(null);
+  // Outcome of the last write, announced politely and shown until the next one.
+  const [statusMessage, setStatusMessage] = React.useState("");
 
   const authorPubkeys = React.useMemo(
     () => [
@@ -166,16 +215,77 @@ function PageDetailBody({
   const channel = channels.find(
     (candidate) => candidate.id === detail.channelId,
   );
-  const channelLabel = channel
-    ? channel.channelType === "dm"
-      ? channel.name
-      : `#${channel.name}`
-    : "another channel";
+  const channelLabel = channelLabelFor(channel);
   const revisionCount = detail.history.length;
+  // Read-only viewers (non-members, archived channels) get no write controls.
+  const canWrite = isChannelWritable(channel);
+
+  // -- Editor open/close, with focus returned to the control that opened it ----
+  const editButtonRef = React.useRef<HTMLButtonElement>(null);
+  const restoreEditFocusRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!editing && restoreEditFocusRef.current) {
+      restoreEditFocusRef.current = false;
+      editButtonRef.current?.focus();
+    }
+  }, [editing]);
+
+  const startEditing = () => {
+    setStatusMessage("");
+    setReviewingId(null);
+    setSelectedRevisionId(null);
+    setEditing(true);
+  };
+  const closeEditor = React.useCallback(() => {
+    restoreEditFocusRef.current = true;
+    setEditing(false);
+  }, []);
+  const finishEditing = React.useCallback(
+    (outcome: PageEditorOutcome) => {
+      setStatusMessage(OUTCOME_MESSAGES[outcome]);
+      closeEditor();
+    },
+    [closeEditor],
+  );
+
+  // -- Suggestions: accept and reject, with focus kept in the rail -------------
+  const suggestionsHeadingRef = React.useRef<HTMLHeadingElement>(null);
+  const handleDecided = React.useCallback((decision: SuggestionDecision) => {
+    setStatusMessage(DECISION_MESSAGES[decision]);
+    // The row that was acted on is gone; leave focus on the rail, not <body>.
+    suggestionsHeadingRef.current?.focus();
+  }, []);
+  const decisions = useSuggestionDecisions({
+    canWrite,
+    communityId,
+    detail,
+    onDecided: handleDecided,
+  });
+  const reviewing =
+    reviewingId === null
+      ? null
+      : (detail.suggestions.find(
+          (state) =>
+            state.suggestion.id === reviewingId && state.closed === null,
+        ) ?? null);
 
   return (
     <>
       <PageHeader
+        action={
+          canWrite && viewingHead && !editing ? (
+            <Button
+              data-testid="page-edit"
+              onClick={startEditing}
+              ref={editButtonRef}
+              size="sm"
+              type="button"
+            >
+              <Pencil aria-hidden className="h-4 w-4" />
+              Edit page
+            </Button>
+          ) : undefined
+        }
         description={
           <>
             in {channelLabel}
@@ -199,7 +309,21 @@ function PageDetailBody({
         title={<span data-testid="page-title">{viewed.title}</span>}
       />
 
-      {viewingHead ? null : (
+      {/* Always mounted so a screen reader hears each outcome as it changes. */}
+      <p
+        aria-live="polite"
+        className={
+          statusMessage
+            ? "rounded-lg border border-border/70 bg-muted/30 px-3 py-2 text-sm"
+            : "sr-only"
+        }
+        data-testid="page-write-status"
+        role="status"
+      >
+        {statusMessage}
+      </p>
+
+      {viewingHead || editing ? null : (
         <div
           className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm"
           data-testid="page-revision-banner"
@@ -222,28 +346,62 @@ function PageDetailBody({
       )}
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_18rem]">
-        <article
-          aria-label="Page content"
-          className="min-w-0 rounded-2xl border border-border/70 bg-muted/20 px-4 py-3"
-          data-testid="page-content"
-        >
-          {viewed.content.trim().length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              This revision is empty.
-            </p>
-          ) : (
-            <Markdown
-              blockCode
-              channelNames={nonDmChannelNames}
-              content={deferredContent}
-              hardLineBreaks={false}
-            />
-          )}
-        </article>
+        {editing ? (
+          <PageEditor
+            DiffViewer={DiffViewer}
+            authorLabel={authorLabel}
+            communityId={communityId}
+            loadLatestHead={loadLatestHead}
+            onClose={closeEditor}
+            onDone={finishEditing}
+            target={{
+              mode: "edit",
+              channelId: detail.channelId,
+              pageId: detail.pageId,
+              head: detail.head,
+            }}
+          />
+        ) : reviewing ? (
+          <SuggestionReview
+            DiffViewer={DiffViewer}
+            authorLabel={authorLabel}
+            detail={detail}
+            onClose={() => setReviewingId(null)}
+            state={reviewing}
+          />
+        ) : (
+          <article
+            aria-label="Page content"
+            className="min-w-0 rounded-2xl border border-border/70 bg-muted/20 px-4 py-3"
+            data-testid="page-content"
+          >
+            {viewed.content.trim().length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                This revision is empty.
+              </p>
+            ) : (
+              <Markdown
+                blockCode
+                channelNames={nonDmChannelNames}
+                content={deferredContent}
+                hardLineBreaks={false}
+              />
+            )}
+          </article>
+        )}
 
         <aside className="min-w-0 space-y-6">
           <PendingSuggestions
             authorLabel={authorLabel}
+            busy={decisions.busy}
+            canWrite={canWrite}
+            errors={decisions.errors}
+            head={detail.head}
+            headingRef={suggestionsHeadingRef}
+            onAccept={(id) => void decisions.accept(id)}
+            onReject={(id) => void decisions.reject(id)}
+            onReview={setReviewingId}
+            reviewingId={reviewing?.suggestion.id ?? null}
             suggestions={detail.suggestions}
             truncated={suggestionsTruncated}
           />

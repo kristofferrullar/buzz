@@ -79,7 +79,10 @@ upstream stays routine and never means rebuilding the feature.
 | `desktop/src-tauri/src/managed_agents/nest_skill.md`, `.../nest.rs` | the Pages workflow section and `pages` output-contract rows in the agent skill (`.claude/skills/sprout-cli/SKILL.md` is a symlink to this file); `NEST_SKILL_VERSION` bumped so installed agents refresh it |
 | `desktop/src/shared/constants/kinds.ts` | mirrored kind constants |
 | `mobile/lib/shared/relay/nostr_models.dart` | mirrored kind constants |
-| desktop sidebar, routes, `e2eBridge.ts` | one entry each |
+| desktop sidebar, routes, `e2eBridge.ts` | one entry each (`e2eBridge.ts`: the page query branch, the three page write commands and one fault hook) |
+| `desktop/src-tauri/src/commands/mod.rs`, `desktop/src-tauri/src/lib.rs` | `mod pages;` / `pub use pages::*;` and the three command names in `invoke_handler` |
+| `desktop/package.json`, `pnpm-lock.yaml` | the `diff` dependency (line diffs for suggestion review); already in the lockfile as a transitive of the router plugin |
+| `desktop/playwright.config.ts` | two `smoke` spec entries (`pages`, `pages-write`) |
 | `preview-features.json` | one `pages` entry |
 
 Everything else lives in new files: `crates/buzz-db/src/store/page.rs` (with its
@@ -88,7 +91,9 @@ ingest primitives and tests under `crates/buzz-db/src/store/page/`),
 `crates/buzz-search/src/page_head.rs` (page-aware search: the exclusion and the
 head arm, with `crates/buzz-search/tests/postgres_pages_search.rs`),
 `crates/buzz-cli/src/commands/pages.rs` (with `pages/model.rs` and `pages/tests.rs`),
-`crates/buzz-cli/tests/pages_cli.rs`, `desktop/src/features/pages/`, and
+`crates/buzz-cli/tests/pages_cli.rs`, `desktop/src/features/pages/`,
+`desktop/src-tauri/src/commands/pages.rs` (+ `pages/builders.rs`, which only
+delegates tag shapes to `buzz-sdk`), and
 `crates/buzz-test-client/tests/e2e_pages.rs`. The agent-facing text (the `pages`
 block in `crates/buzz-acp/src/base_prompt.md` and the Pages section of the
 `sprout-cli` skill) is additive and stands or falls with the CLI.
