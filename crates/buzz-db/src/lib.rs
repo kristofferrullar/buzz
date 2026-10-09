@@ -53,6 +53,8 @@ pub use store::{
     replaceable, thread, usage, user, workflow,
 };
 
+pub use store::page;
+
 pub use allowlist::AllowlistEntry;
 pub use api_token::{ApiTokenRecord, TokenSummary};
 pub use community::{

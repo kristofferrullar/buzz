@@ -854,6 +854,12 @@ pub(crate) fn count_fallback_exceeded(candidate_count: usize) -> bool {
     candidate_count > COUNT_FALLBACK_CANDIDATE_LIMIT as usize
 }
 
+/// Whether events of `kind` carry their `d` tag value in the `d_tag` column
+/// (`buzz_db::event::extract_d_tag`): NIP-33 kinds and NIP-PG page kinds.
+fn stores_d_tag(kind: u32) -> bool {
+    buzz_core::kind::is_parameterized_replaceable(kind) || buzz_core::page::is_page_kind(kind)
+}
+
 /// Returns `true` if all constraints in this filter can be fully represented
 /// in SQL by `filter_to_query_params` — meaning `count_events()` will produce
 /// an exact count without post-filtering.
@@ -865,13 +871,12 @@ pub(crate) fn count_fallback_exceeded(candidate_count: usize) -> bool {
 /// Anything else (multi-#p, #t, #a, search, #d on non-NIP-33) requires
 /// post-filtering and cannot use the fast COUNT path.
 pub fn filter_fully_pushable(filter: &Filter) -> bool {
-    // Check if filter exclusively targets NIP-33 kinds (needed for #d pushability).
-    let is_nip33_only = filter.kinds.as_ref().is_some_and(|ks| {
-        !ks.is_empty()
-            && ks
-                .iter()
-                .all(|k| buzz_core::kind::is_parameterized_replaceable(k.as_u16() as u32))
-    });
+    // Check if filter exclusively targets kinds whose `d_tag` column is populated
+    // (NIP-33 and NIP-PG page kinds; needed for #d pushability).
+    let is_nip33_only = filter
+        .kinds
+        .as_ref()
+        .is_some_and(|ks| !ks.is_empty() && ks.iter().all(|k| stores_d_tag(k.as_u16() as u32)));
 
     for (tag_key, tag_values) in filter.generic_tags.iter() {
         let key = tag_key.to_string();
@@ -887,7 +892,8 @@ pub fn filter_fully_pushable(filter: &Filter) -> bool {
                 }
             }
             "d" => {
-                // #d is pushed (single or multi) ONLY for NIP-33-only kind filters.
+                // #d is pushed (single or multi) ONLY for filters whose kinds all
+                // store `d_tag` (NIP-33 and NIP-PG page kinds).
                 // Otherwise it's silently ignored by SQL → overcount.
                 if !tag_values.is_empty() && !is_nip33_only {
                     return false;
@@ -1030,16 +1036,14 @@ fn filter_to_query_params(
     // Critical for parameterized replaceable lookups (authors + kinds + #d)
     // where many events from the same author would push the target past LIMIT.
     //
-    // Only push when the filter exclusively targets NIP-33 kinds (30000–39999),
-    // because `d_tag` is only populated for those kinds. Non-NIP-33 events have
-    // `d_tag = NULL`, so pushing `AND d_tag = $N` for a mixed-kind or kindless
+    // Only push when the filter exclusively targets kinds that store `d_tag`:
+    // NIP-33 (30000–39999) and the NIP-PG page kinds, where it holds the page id
+    // so a page's history is answered exactly in SQL (NIP-PG rule 8). Other events
+    // have `d_tag = NULL`, so pushing `AND d_tag = $N` for a mixed-kind or kindless
     // filter would silently exclude non-NIP-33 rows that match via their tags.
-    let filter_is_nip33_only = kinds.as_ref().is_some_and(|ks| {
-        !ks.is_empty()
-            && ks
-                .iter()
-                .all(|&k| buzz_core::kind::is_parameterized_replaceable(k as u32))
-    });
+    let filter_is_nip33_only = kinds
+        .as_ref()
+        .is_some_and(|ks| !ks.is_empty() && ks.iter().all(|&k| stores_d_tag(k as u32)));
     let d_tag_key = nostr::SingleLetterTag::lowercase(nostr::Alphabet::D);
     let (d_tag, d_tags) = if filter_is_nip33_only {
         let values = filter.generic_tags.get(&d_tag_key);
@@ -2245,6 +2249,62 @@ mod tests {
             buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
         );
         assert_eq!(q5.d_tag, None);
+    }
+
+    /// NIP-PG rule 8: `#d` on a page-kind filter is answered in SQL, before the row
+    /// limit, so a quiet page's history is complete in a busy channel. Mixed
+    /// filters keep the old behaviour (the `d_tag` column is NULL for other kinds).
+    #[test]
+    fn d_tag_pushdown_covers_page_kinds_only_when_every_kind_stores_it() {
+        use buzz_core::kind::{
+            KIND_PAGE_REVISION, KIND_PAGE_SUGGESTION, KIND_PAGE_SUGGESTION_RESOLUTION,
+        };
+        let d_tag = SingleLetterTag::lowercase(Alphabet::D);
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil());
+        let page_kind = |kind: u32| nostr::Kind::Custom(kind as u16);
+        let page_id = uuid::Uuid::new_v4().to_string();
+
+        for kind in [
+            KIND_PAGE_REVISION,
+            KIND_PAGE_SUGGESTION,
+            KIND_PAGE_SUGGESTION_RESOLUTION,
+        ] {
+            let filter = Filter::new()
+                .kind(page_kind(kind))
+                .custom_tags(d_tag, [page_id.as_str()]);
+            let q = filter_to_query_params(&filter, None, community);
+            assert_eq!(q.d_tag.as_deref(), Some(page_id.as_str()), "kind {kind}");
+            assert!(filter_fully_pushable(&filter), "kind {kind}");
+        }
+
+        // All three page kinds together, and several page ids, push too.
+        let other_page = uuid::Uuid::new_v4().to_string();
+        let all_kinds = Filter::new()
+            .kinds([
+                page_kind(KIND_PAGE_REVISION),
+                page_kind(KIND_PAGE_SUGGESTION),
+                page_kind(KIND_PAGE_SUGGESTION_RESOLUTION),
+            ])
+            .custom_tags(d_tag, [page_id.as_str(), other_page.as_str()]);
+        let q = filter_to_query_params(&all_kinds, None, community);
+        assert_eq!(q.d_tag, None);
+        assert_eq!(q.d_tags.as_ref().map(Vec::len), Some(2));
+        assert!(filter_fully_pushable(&all_kinds));
+
+        // A page kind mixed with a kind whose d_tag column is NULL must not push.
+        let mixed = Filter::new()
+            .kinds([page_kind(KIND_PAGE_REVISION), nostr::Kind::Custom(9)])
+            .custom_tags(d_tag, [page_id.as_str()]);
+        let q = filter_to_query_params(&mixed, None, community);
+        assert_eq!((q.d_tag, q.d_tags), (None, None));
+        assert!(!filter_fully_pushable(&mixed));
+
+        // Kindless page queries cannot push either.
+        let kindless = Filter::new().custom_tags(d_tag, [page_id.as_str()]);
+        assert_eq!(
+            filter_to_query_params(&kindless, None, community).d_tag,
+            None
+        );
     }
 
     #[test]

@@ -2,8 +2,8 @@
 name: buzz-cli
 description: >
   Buzz CLI for relay operations: owner-reviewed agent drafts, messaging,
-  channels, DMs, users, workflows, feed, reactions, canvas, social, repos,
-  uploads, and agent memory.
+  channels, DMs, users, workflows, feed, reactions, canvas, pages (suggest
+  edits to shared documents), social, repos, uploads, and agent memory.
 version: 1
 ---
 
@@ -53,13 +53,17 @@ Output varies by command group — `--help` shows flags but not response shapes.
 
 **Read commands** return JSON arrays. Event reads (`messages get/thread/search`, `feed get`) return normalized, complete signed Nostr events with `{id, pubkey, kind, content, created_at, tags, sig}`. Other reads use command-specific shapes for channels (`{channel_id, name, description, created_at}`), users (kind:0 profile JSON with `pubkey` injected), and workflows (`{workflow_id, content, created_at, pubkey}`).
 
-**Write commands**: all return `{event_id, accepted, message}`. Create commands add the generated entity ID: `channels create` → `channel_id`, `dms open` → `dm_id`, `workflows create` → `workflow_id`. Agent draft commands add `{request_id, action, saved: false}` because they only open an owner-reviewed Desktop draft.
+**Write commands**: all return `{event_id, accepted, message}`. Create commands add the generated entity ID: `channels create` → `channel_id`, `dms open` → `dm_id`, `workflows create` → `workflow_id`, `pages set --new` → `page_id`, `pages suggest` → `suggestion_id`. Agent draft commands add `{request_id, action, saved: false}` because they only open an owner-reviewed Desktop draft.
 
 **Exceptions to the above patterns:**
 
 | Command | Output |
 |---------|--------|
 | `canvas get` | raw markdown string or `null` — NOT a JSON envelope |
+| `pages get` | one JSON object `{page_id, channel_id, revision, head, is_head, prev, title, author, updated_at, content}`; `head` is the `--base` for your next write |
+| `pages ls` | array of `{page_id, channel_id, title, head, updated_by, updated_at}`, one per page |
+| `pages history` | normalized event array, newest first: revisions, plus still-open suggestions with `--suggestions` |
+| `pages export` | the head's raw markdown, byte for byte (`--out FILE` prints a JSON summary instead) |
 | `social *`, `repos get/list` | raw Nostr event JSON INCLUDING `sig` — different contract than read commands above |
 | `repos protect list` | `{repo_id, protections: [{ref, rules}], unknown_rules, validation_error}` |
 | `upload file` | pretty-printed multi-line `BlobDescriptor`: `{url, sha256, size, type, uploaded}` |
@@ -162,6 +166,21 @@ buzz mem patch <slug> --base-hash "$HASH" --patch-file diff.patch  # 2. apply wi
 Exit code 5 if the value changed since the hash was read (another agent wrote first). Retry by re-reading, re-diffing, and re-patching.
 
 Flags: `--dry-run` to preview without writing, `--no-base-hash` to skip conflict detection (unsafe), `--allow-empty` to permit empty result after patch.
+
+## Pages Workflow
+
+Pages are markdown documents that live in a channel and are edited by appending revisions. **Agents suggest; people accept.** Do not rewrite a page when you can propose the change, and do not create pages unless asked.
+
+```bash
+buzz pages get <page-id> --channel <uuid>                       # read; note `head`
+buzz pages suggest <page-id> --channel <uuid> --base <head> --file proposed.md
+```
+
+A suggestion carries the full proposed markdown and does not change the page. A person then runs `pages accept` (one new revision) or `pages reject`. Use `pages set --page <id> --base <head>` only when told to edit the page directly; `--base` is required for every edit and suggestion.
+
+**Exit code 5 means the page moved since you read it** (another writer got there first). Re-run `pages get`, rebuild your change on the new `head`, and retry, or `suggest` it instead. The error names the current head. Never retry with the same stale `--base`, and never loop on exit 5 without re-reading. `pages accept` exits 5 without publishing anything when the suggestion's base is no longer the head; `pages history <id> --suggestions` shows what is still open.
+
+Other write errors: `invalid:` (exit 1) is a rejected input, such as a no-op revision, a blank title or content over 65,536 bytes; `restricted:` (exit 3) means you cannot write to the channel. A `duplicate:` message on an accepted write is success: the relay already had that event.
 
 ## Polling Pattern
 

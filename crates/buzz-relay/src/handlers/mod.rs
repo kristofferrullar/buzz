@@ -26,6 +26,8 @@ pub mod moderation_authz;
 pub mod moderation_commands;
 /// Relay-signed moderation notice DMs.
 pub mod moderation_notices;
+/// NIP-PG page ingest (kinds 52000–52002).
+pub mod pages;
 /// Product-feedback validation + deployment sidecar persistence.
 pub mod product_feedback;
 #[allow(dead_code, missing_docs)]
