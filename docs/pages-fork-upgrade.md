@@ -16,13 +16,16 @@ upstream stays routine and never means rebuilding the feature.
    `Kind::Custom(u16)`. Keep all page kinds in one commented block in
    `kind.rs`. A renumber is that block plus the two client mirrors; a parity
    test fails if `kinds.ts` or `nostr_models.dart` drift from `kind.rs`.
-5. **One migration, additive, never renumbered.** `CREATE ... IF NOT EXISTS`, no
-   edits to existing tables, and the same change in `schema/schema.sql`. sqlx
-   records each applied migration by version and checksum, so renaming or
-   editing a migration after it has been applied fails startup. The pages
-   migration is therefore **`migrations/9001_pages_index.sql`**: fork-private
-   versions are allocated from 9000 upward, far above upstream's sequence
-   (0001-0044 today), so an upstream merge never forces a rename.
+5. **Few migrations, additive, never renumbered.** `CREATE ... IF NOT EXISTS`, no
+   edits to upstream tables (in particular never `events` or its generated
+   `search_tsv`), and the same change in `schema/schema.sql`. sqlx records each
+   applied migration by version and checksum, so renaming or editing a
+   migration after it has been applied fails startup. The pages migrations are
+   therefore **`migrations/9001_pages_index.sql`** (the `pages` table) and
+   **`migrations/9002_pages_search.sql`** (the search projection on that same
+   table: `pages.search_tsv`, its GIN index and the trigger that maintains it):
+   fork-private versions are allocated from 9000 upward, far above upstream's
+   sequence (0001-0044 today), so an upstream merge never forces a rename.
 
    What was proven (tests in
    `crates/buzz-db/src/runtime/migration/pages_fork_tests.rs`, all passing):
@@ -31,12 +34,16 @@ upstream stays routine and never means rebuilding the feature.
      require contiguous numbers and does not reject a pending version lower than
      the highest applied one. No repo script, CI job or lint requires
      contiguous numbering. `ignore_missing` is not needed and is not used.
-   - A fresh database applies 0001-00NN and then 9001 last; an upstream-only
-     database upgrades by applying just 9001; the migration is idempotent.
-   - A database that already applied 9001 starts cleanly after a later upstream
-     migration is added (simulated with a synthetic migration numbered above
-     upstream's highest, built in the test, not committed), and a fresh database
-     applies the merged set with 9001 last.
+   - A fresh database applies 0001-00NN and then 9001 and 9002 last; an
+     upstream-only database upgrades by applying just those two; both migrations
+     are idempotent; a database that applied only 9001 upgrades by applying 9002,
+     which backfills the search vector of the pages it already holds; 9002 is
+     pinned to its additive shape (one column, one function, one trigger, one
+     index, one backfill, all on `pages`).
+   - A database that already applied 9001 and 9002 starts cleanly after a later
+     upstream migration is added (simulated with a synthetic migration numbered
+     above upstream's highest, built in the test, not committed), and a fresh
+     database applies the merged set with 9001 and 9002 last.
    - Renaming 9001 fails with `VersionMissing(9001)` and editing it fails with
      `VersionMismatch(9001)`: the failures this rule exists to avoid.
    - `schema/schema.sql` and the migration build the same `pages` table and fence
@@ -61,7 +68,9 @@ upstream stays routine and never means rebuilding the feature.
 | `crates/buzz-relay/src/handlers/mod.rs` | `pub mod pages;` |
 | `crates/buzz-db/src/store/event.rs` | `extract_d_tag` also returns the page id for page kinds (the `d_tag` column the `#d` pushdown reads) |
 | `.github/workflows/_ci-relay.yml` | `--test e2e_pages` in the Relay E2E step, and one `cargo test -p buzz-cli --test pages_cli -- --ignored` line beside it |
-| `migrations/`, `schema/schema.sql` | one additive file (`9001_pages_index.sql`) / one block above the deletion section |
+| `migrations/`, `schema/schema.sql` | two additive files (`9001_pages_index.sql`, `9002_pages_search.sql`) / one block above the deletion section (the table, its `search_tsv` column, GIN index, function and trigger) |
+| `crates/buzz-search/src/query.rs` | `search()` keeps its statement; four edits: `AND kind NOT IN (page kinds)` after the base `WHERE` (`page_head::push_page_kind_exclusion`), `created_at` added to the select list (so the `UNION ALL` result can order by it), the scope-filter block extracted unchanged into `push_event_filters` (both arms share it), and one `page_head::push_page_head_arm` call before `ORDER BY`; `push_tsquery` is `pub(crate)` |
+| `crates/buzz-search/src/lib.rs` | `mod page_head;` |
 | `crates/buzz-db/src/store/deletion.rs` | `"pages"` in `EXPECTED_SCOPED_TABLES` and, before `"channels"`, in `PURGE_SCOPED_TABLES` (a community-scoped table missing from the first blocks community deletion) |
 | `crates/buzz-db/src/runtime/migration.rs` | one `mod pages_fork_tests;` line; the `< FORK_PRIVATE_VERSION_FLOOR` filter in `embedded_migrator_contains_consolidated_initial_schema`; one `apply_fork_private_migrations` call before the catalog check in `migration_0044_drops_populated_nip_fi_ledger_cleanly` (that test stops at 0044 and the deletion manifest now lists `pages`) |
 | `crates/buzz-db/src/store/mod.rs`, `crates/buzz-db/src/lib.rs` | `pub mod page;` and `pub use store::page;` |
@@ -76,6 +85,8 @@ upstream stays routine and never means rebuilding the feature.
 Everything else lives in new files: `crates/buzz-db/src/store/page.rs` (with its
 ingest primitives and tests under `crates/buzz-db/src/store/page/`),
 `crates/buzz-relay/src/handlers/pages.rs` (validation and atomic storage),
+`crates/buzz-search/src/page_head.rs` (page-aware search: the exclusion and the
+head arm, with `crates/buzz-search/tests/postgres_pages_search.rs`),
 `crates/buzz-cli/src/commands/pages.rs` (with `pages/model.rs` and `pages/tests.rs`),
 `crates/buzz-cli/tests/pages_cli.rs`, `desktop/src/features/pages/`, and
 `crates/buzz-test-client/tests/e2e_pages.rs`. The agent-facing text (the `pages`
@@ -110,6 +121,12 @@ Sync often; small drift keeps hotspot conflicts to a line or two.
 - `#d` on page kinds is still answered in SQL: `stores_d_tag` in `req.rs` and
   `extract_d_tag` in `event.rs` must both still cover page kinds
   (`quiet_page_history_is_exact_in_a_flooded_channel` fails if either is lost).
+- Page search is still head-only: `search()` in `query.rs` still excludes page
+  kinds from the generic arm and calls `push_page_head_arm`, and the scope
+  filters still go through `push_event_filters` (`postgres_pages_search.rs`
+  fails if any of the three is lost). If upstream changes the FTS policy of
+  `events.search_tsv` (allowlist or exclusion list), nothing here depends on it
+  (`postgres_pages_search.rs` runs every scenario under both policies).
 - Upstream has not started storing a different value in `events.d_tag` for
   regular kinds, and no upstream query treats `d_tag IS NOT NULL` as "NIP-33 row".
 - Upstream has not allocated a kind or table name we use.

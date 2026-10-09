@@ -1,12 +1,13 @@
-//! Proofs for the fork-private pages migration (`migrations/9001_pages_index.sql`).
+//! Proofs for the fork-private pages migrations (`migrations/9001_pages_index.sql`
+//! and `migrations/9002_pages_search.sql`).
 //!
 //! The fork rule (docs/pages-fork-upgrade.md, rule 5) is that an applied sqlx
-//! migration is never renamed or edited, so the pages migration takes a version
+//! migration is never renamed or edited, so the pages migrations take versions
 //! far above upstream's sequence and an upstream merge can keep adding 0045,
-//! 0046, ... around it. These tests pin the properties that make that safe:
-//! the number, the additive-only shape, a fresh install, an upgrade from an
-//! upstream-only database, a database that already applied it surviving a later
-//! upstream migration, and the failure that renaming would cause.
+//! 0046, ... around them. These tests pin the properties that make that safe:
+//! the numbers, the additive-only shape, a fresh install, an upgrade from an
+//! upstream-only database, a database that already applied them surviving a
+//! later upstream migration, and the failure that renaming would cause.
 
 use super::MIGRATOR;
 
@@ -15,6 +16,8 @@ pub(super) const FORK_PRIVATE_VERSION_FLOOR: i64 = 9000;
 /// The pages migration. Never change this number: it is recorded in every
 /// database that has applied the migration.
 const PAGES_MIGRATION_VERSION: i64 = 9001;
+/// The page search projection (`pages.search_tsv`). Same rule: never change it.
+const PAGES_SEARCH_MIGRATION_VERSION: i64 = 9002;
 /// Minimum gap kept between the highest upstream version and the pages
 /// migration. If an upstream merge ever erodes it, this test says so long
 /// before the sequences could collide.
@@ -43,23 +46,29 @@ fn upstream_versions() -> Vec<i64> {
 }
 
 #[test]
-fn pages_migration_is_the_only_fork_private_version_and_sorts_after_upstream() {
-    let fork_private: Vec<i64> = MIGRATOR
+fn pages_migrations_are_the_only_fork_private_versions_and_sort_after_upstream() {
+    let mut fork_private: Vec<i64> = MIGRATOR
         .iter()
         .map(|migration| migration.version)
         .filter(|version| *version >= FORK_PRIVATE_VERSION_FLOOR)
         .collect();
+    fork_private.sort_unstable();
     assert_eq!(
         fork_private,
-        vec![PAGES_MIGRATION_VERSION],
-        "the fork carries exactly one private migration; allocate further ones from \
+        vec![PAGES_MIGRATION_VERSION, PAGES_SEARCH_MIGRATION_VERSION],
+        "the fork carries exactly two private migrations; allocate further ones from \
          {FORK_PRIVATE_VERSION_FLOOR} upward and update this test"
     );
-    let migration = MIGRATOR
-        .iter()
-        .find(|migration| migration.version == PAGES_MIGRATION_VERSION)
-        .expect("pages migration is embedded");
-    assert_eq!(&*migration.description, "pages index");
+    for (version, description) in [
+        (PAGES_MIGRATION_VERSION, "pages index"),
+        (PAGES_SEARCH_MIGRATION_VERSION, "pages search"),
+    ] {
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == version)
+            .expect("pages migration is embedded");
+        assert_eq!(&*migration.description, description);
+    }
 
     let upstream = upstream_versions();
     let highest_upstream = *upstream.last().expect("upstream migrations exist");
@@ -116,6 +125,95 @@ fn pages_migration_is_additive_and_idempotent_by_construction() {
         assert!(
             !format!(" {code} ").to_ascii_lowercase().contains(forbidden),
             "the pages migration must not edit existing objects or data ({forbidden:?})"
+        );
+    }
+}
+
+/// Split migration SQL into normalized (lowercase, single-spaced) statements,
+/// ignoring `--` comments and keeping `$$ ... $$` bodies (whose inner `;`
+/// belong to the function) inside their statement.
+fn normalized_statements(sql: &str) -> Vec<String> {
+    let code: String = sql
+        .lines()
+        .map(|line| line.split_once("--").map_or(line, |(before, _)| before))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    for (index, part) in code.split("$$").enumerate() {
+        if index % 2 == 1 {
+            // Inside a dollar-quoted body: keep it out of the statement text.
+            current.push_str(" $$body$$ ");
+            continue;
+        }
+        let mut pieces = part.split(';').peekable();
+        while let Some(piece) = pieces.next() {
+            current.push_str(piece);
+            if pieces.peek().is_some() {
+                statements.push(std::mem::take(&mut current));
+            }
+        }
+    }
+    statements.push(current);
+    statements
+        .into_iter()
+        .map(|statement| {
+            statement
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase()
+        })
+        .filter(|statement| !statement.is_empty())
+        .collect()
+}
+
+#[test]
+fn pages_search_migration_is_additive_and_idempotent_by_construction() {
+    let sql = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == PAGES_SEARCH_MIGRATION_VERSION)
+        .expect("pages search migration is embedded")
+        .sql
+        .as_ref()
+        .to_owned();
+    let statements = normalized_statements(&sql);
+    assert_eq!(
+        statements.len(),
+        5,
+        "column, function, trigger, index, backfill: {statements:?}"
+    );
+    for statement in &statements {
+        let allowed = statement
+            .starts_with("alter table pages add column if not exists search_tsv tsvector")
+            || statement.starts_with("create or replace function pages_refresh_search_tsv() ")
+            || statement.starts_with("create or replace trigger pages_search_tsv ")
+            || statement.starts_with("create index if not exists idx_pages_search_tsv ")
+            || statement
+                == "update pages set head_event_id = head_event_id where search_tsv is null";
+        assert!(
+            allowed,
+            "the page search migration may only extend `pages` idempotently; found: {statement}"
+        );
+    }
+    // It never touches another table (the function reads `events`, never writes).
+    let code = sql
+        .lines()
+        .map(|line| line.split_once("--").map_or(line, |(before, _)| before))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
+    for forbidden in [
+        " drop ",
+        " truncate ",
+        " delete ",
+        "insert into",
+        "alter table events",
+        "update events",
+    ] {
+        assert!(
+            !format!(" {code} ").contains(forbidden),
+            "the page search migration must not edit existing objects ({forbidden:?})"
         );
     }
 }
@@ -218,6 +316,14 @@ mod postgres_tests {
             .clone()
     }
 
+    fn pages_search_migration() -> Migration {
+        MIGRATOR
+            .iter()
+            .find(|migration| migration.version == PAGES_SEARCH_MIGRATION_VERSION)
+            .expect("pages search migration is embedded")
+            .clone()
+    }
+
     /// The embedded migrations plus `extra`, as a freshly built migrator.
     fn migrator_with(extra: Vec<Migration>, skip: Option<i64>) -> Migrator {
         let mut migrations: Vec<Migration> = MIGRATOR
@@ -252,6 +358,7 @@ mod postgres_tests {
         expected.sort_unstable();
         assert_eq!(applied_versions(&db.pool).await, expected);
         assert!(expected.contains(&PAGES_MIGRATION_VERSION));
+        assert!(expected.contains(&PAGES_SEARCH_MIGRATION_VERSION));
         assert!(table_exists(&db.pool, "pages").await);
         let fenced: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_trigger \
@@ -271,6 +378,10 @@ mod postgres_tests {
             .execute(&db.pool)
             .await
             .expect("replaying the pages migration is a no-op");
+        sqlx::raw_sql(pages_search_migration().sql)
+            .execute(&db.pool)
+            .await
+            .expect("replaying the page search migration is a no-op");
         run_migrations(&db.pool).await.expect("restart");
         assert_eq!(applied_versions(&db.pool).await, expected);
         db.finish().await;
@@ -291,9 +402,91 @@ mod postgres_tests {
         run_migrations(&db.pool).await.expect("fork upgrade");
         let mut expected = upstream_versions();
         expected.push(PAGES_MIGRATION_VERSION);
+        expected.push(PAGES_SEARCH_MIGRATION_VERSION);
         assert_eq!(applied_versions(&db.pool).await, expected);
         assert!(table_exists(&db.pool, "pages").await);
         db.finish().await;
+    }
+
+    /// A database that already applied 9001 (a fork binary from before page
+    /// search) upgrades by applying only 9002, which backfills the search
+    /// vector of the pages it already holds.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_schema_pages_search_backfills_pages_written_before_9002() {
+        let db = Scratch::new("search_backfill").await;
+        let before_9002 = migrator_with(vec![], Some(PAGES_SEARCH_MIGRATION_VERSION));
+        db.run(&before_9002).await.expect("startup before 9002");
+        assert!(!column_exists(&db.pool, "pages", "search_tsv").await);
+
+        let community = uuid::Uuid::new_v4();
+        let channel = uuid::Uuid::new_v4();
+        let head = vec![9_u8; 32];
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community)
+            .bind(format!("backfill-{}.example", community.simple()))
+            .execute(&db.pool)
+            .await
+            .expect("community");
+        sqlx::query(
+            "INSERT INTO channels (id, community_id, name, created_by) VALUES ($1, $2, 'c', $3)",
+        )
+        .bind(channel)
+        .bind(community)
+        .bind(vec![1_u8; 32])
+        .execute(&db.pool)
+        .await
+        .expect("channel");
+        sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id) \
+             VALUES ($1, $2, $3, '2026-02-01T00:00:00Z', 52000, '[]'::jsonb, 'backfilledneedle body', $4, $5)",
+        )
+        .bind(community)
+        .bind(&head)
+        .bind(vec![2_u8; 32])
+        .bind(vec![3_u8; 64])
+        .bind(channel)
+        .execute(&db.pool)
+        .await
+        .expect("head event");
+        sqlx::query(
+            "INSERT INTO pages (community_id, channel_id, page_id, head_event_id, title, \
+             created_by, created_at, updated_by, updated_at) \
+             VALUES ($1, $2, $3, $4, 'Old page', $5, '2026-02-01T00:00:00Z', $5, '2026-02-01T00:00:00Z')",
+        )
+        .bind(community)
+        .bind(channel)
+        .bind(uuid::Uuid::new_v4())
+        .bind(&head)
+        .bind(vec![2_u8; 32])
+        .execute(&db.pool)
+        .await
+        .expect("page written before 9002");
+
+        run_migrations(&db.pool).await.expect("apply 9002");
+        let matches: bool = sqlx::query_scalar(
+            "SELECT search_tsv @@ plainto_tsquery('simple', 'backfilledneedle') AND \
+                    search_tsv @@ plainto_tsquery('simple', 'page') \
+             FROM pages WHERE community_id = $1",
+        )
+        .bind(community)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read backfilled vector");
+        assert!(matches, "9002 projects the head of every existing page");
+        db.finish().await;
+    }
+
+    async fn column_exists(pool: &PgPool, table: &str, column: &str) -> bool {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+             WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2)",
+        )
+        .bind(table)
+        .bind(column)
+        .fetch_one(pool)
+        .await
+        .expect("column lookup")
     }
 
     /// Proof (b): a database that already applied the pages migration starts
@@ -346,6 +539,7 @@ mod postgres_tests {
         let mut expected = upstream_versions();
         expected.push(synthetic_version);
         expected.push(PAGES_MIGRATION_VERSION);
+        expected.push(PAGES_SEARCH_MIGRATION_VERSION);
         assert_eq!(applied_versions(&db.pool).await, expected);
         assert!(table_exists(&db.pool, "synthetic_upstream_marker").await);
         let kept: i64 = sqlx::query_scalar("SELECT count(*) FROM pages WHERE title = 'kept'")
