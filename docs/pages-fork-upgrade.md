@@ -60,12 +60,14 @@ upstream stays routine and never means rebuilding the feature.
 | `crates/buzz-relay/src/handlers/side_effects.rs` | two 4-line hooks in the 9005 and NIP-09 deletion handlers calling `pages::delete_page_event` (delete a page event and repair the head in one transaction) |
 | `crates/buzz-relay/src/handlers/mod.rs` | `pub mod pages;` |
 | `crates/buzz-db/src/store/event.rs` | `extract_d_tag` also returns the page id for page kinds (the `d_tag` column the `#d` pushdown reads) |
-| `.github/workflows/_ci-relay.yml` | `--test e2e_pages` in the Relay E2E step |
+| `.github/workflows/_ci-relay.yml` | `--test e2e_pages` in the Relay E2E step, and one `cargo test -p buzz-cli --test pages_cli -- --ignored` line beside it |
 | `migrations/`, `schema/schema.sql` | one additive file (`9001_pages_index.sql`) / one block above the deletion section |
 | `crates/buzz-db/src/store/deletion.rs` | `"pages"` in `EXPECTED_SCOPED_TABLES` and, before `"channels"`, in `PURGE_SCOPED_TABLES` (a community-scoped table missing from the first blocks community deletion) |
 | `crates/buzz-db/src/runtime/migration.rs` | one `mod pages_fork_tests;` line; the `< FORK_PRIVATE_VERSION_FLOOR` filter in `embedded_migrator_contains_consolidated_initial_schema`; one `apply_fork_private_migrations` call before the catalog check in `migration_0044_drops_populated_nip_fi_ledger_cleanly` (that test stops at 0044 and the deletion manifest now lists `pages`) |
 | `crates/buzz-db/src/store/mod.rs`, `crates/buzz-db/src/lib.rs` | `pub mod page;` and `pub use store::page;` |
-| `crates/buzz-cli/src/commands/mod.rs` | `pub mod pages;` and its dispatch |
+| `crates/buzz-cli/src/commands/mod.rs`, `crates/buzz-cli/src/lib.rs` | `pub mod pages;`; in `lib.rs` one `Cmd::Pages(commands::pages::PagesCmd)` variant, one dispatch arm, and the `pages` entries in the `command_inventory_is_stable` / `subcommand_counts_are_stable` tests (the `PagesCmd` enum itself lives in `commands/pages.rs`) |
+| `crates/buzz-acp/src/base_prompt.md`, `crates/buzz-acp/src/lib.rs` | a `buzz pages` row in the CLI table, `5 write conflict` in the exit-code list, and one `## Pages` paragraph (pinned by `base_prompt_pages.rs`, registered with one `#[cfg(test)] mod base_prompt_pages;` line) |
+| `desktop/src-tauri/src/managed_agents/nest_skill.md`, `.../nest.rs` | the Pages workflow section and `pages` output-contract rows in the agent skill (`.claude/skills/sprout-cli/SKILL.md` is a symlink to this file); `NEST_SKILL_VERSION` bumped so installed agents refresh it |
 | `desktop/src/shared/constants/kinds.ts` | mirrored kind constants |
 | `mobile/lib/shared/relay/nostr_models.dart` | mirrored kind constants |
 | desktop sidebar, routes, `e2eBridge.ts` | one entry each |
@@ -74,8 +76,11 @@ upstream stays routine and never means rebuilding the feature.
 Everything else lives in new files: `crates/buzz-db/src/store/page.rs` (with its
 ingest primitives and tests under `crates/buzz-db/src/store/page/`),
 `crates/buzz-relay/src/handlers/pages.rs` (validation and atomic storage),
-`crates/buzz-cli/src/commands/pages.rs`, `desktop/src/features/pages/`, and
-`crates/buzz-test-client/tests/e2e_pages.rs`.
+`crates/buzz-cli/src/commands/pages.rs` (with `pages/model.rs` and `pages/tests.rs`),
+`crates/buzz-cli/tests/pages_cli.rs`, `desktop/src/features/pages/`, and
+`crates/buzz-test-client/tests/e2e_pages.rs`. The agent-facing text (the `pages`
+block in `crates/buzz-acp/src/base_prompt.md` and the Pages section of the
+`sprout-cli` skill) is additive and stands or falls with the CLI.
 
 ## Sync routine
 
@@ -108,3 +113,8 @@ Sync often; small drift keeps hotspot conflicts to a line or two.
 - Upstream has not started storing a different value in `events.d_tag` for
   regular kinds, and no upstream query treats `d_tag IS NOT NULL` as "NIP-33 row".
 - Upstream has not allocated a kind or table name we use.
+- `NEST_SKILL_VERSION` in `nest.rs` is still above the version upstream shipped
+  before our skill text (a merge that lands upstream's own bump at the same
+  number would stop installed agents refreshing the Pages section), and the
+  `Pages Workflow` section survived the merge of `nest_skill.md`
+  (`cargo test -p buzz-cli --test pages_cli` pins the text).

@@ -102,6 +102,11 @@ cargo test -p buzz-cli
 
 cargo clippy -p buzz-cli -- -D warnings
 # Expected: zero warnings
+
+# buzz pages through the production binary. The offline tests run anywhere; the
+# ignored one walks the whole workflow (§6.13) against a running relay.
+cargo test -p buzz-cli --test pages_cli
+RELAY_URL=ws://localhost:3000 cargo test -p buzz-cli --test pages_cli -- --ignored
 ```
 
 ---
@@ -486,6 +491,68 @@ buzz notes get --name dco-check   # exits non-zero: not found
 buzz notes rm --name does-not-exist   # exits non-zero
 ```
 
+### 6.13 Pages (NIP-PG, kinds 52000-52002)
+
+Channel documents edited by appending revisions. Needs a relay built from a tree
+that includes the pages ingest (PR3). Use two identities to see the agent/human
+split: `$HUMAN` and `$AGENT` are two `BUZZ_PRIVATE_KEY`s; the channel is `open`
+so both can write.
+
+```bash
+# create — prints page_id and event_id (event_id is the head)
+buzz pages set --channel "$CHANNEL_ID" --new --title "Runbook" --file runbook.md
+# → {"accepted":true,"event_id":"<rev1>","message":"","page_id":"<uuid>"}
+PAGE=<page_id>; REV1=<event_id>
+
+# get — head, title, author; `head` is the --base for the next write
+buzz pages get "$PAGE" --channel "$CHANNEL_ID" | jq .
+buzz --format compact pages get "$PAGE" --channel "$CHANNEL_ID"   # {page_id,revision,head,title,content}
+
+# edit on the head (title carried forward when --title is omitted)
+buzz pages set --channel "$CHANNEL_ID" --page "$PAGE" --base "$REV1" --file runbook-v2.md
+# → {"accepted":true,"event_id":"<rev2>","message":""}
+
+# edit on a stale base → exit 5; the message names the head to retry on
+buzz pages set --channel "$CHANNEL_ID" --page "$PAGE" --base "$REV1" --content "lost"; echo "exit: $?"
+# stderr: {"error":"conflict","message":"conflict: stale prev (head <rev2>) — re-read the page ... retry with --base <rev2> ...","retryable":false}
+# exit: 5
+
+# edit with no --base → refused locally (exit 1), nothing is sent
+buzz pages set --channel "$CHANNEL_ID" --page "$PAGE" --file runbook-v2.md; echo "exit: $?"
+
+# suggest (agent) → the page does not change
+BUZZ_PRIVATE_KEY=$AGENT buzz pages suggest "$PAGE" --channel "$CHANNEL_ID" --base "$REV2" --file proposed.md
+# → {"accepted":true,"event_id":"<sug>","message":"","suggestion_id":"<sug>"}
+buzz --format compact pages history "$PAGE" --channel "$CHANNEL_ID" --suggestions   # lists <sug> as open
+
+# accept (human) → exactly one revision, head advances; no resolution event is published
+buzz pages accept "$SUG" --channel "$CHANNEL_ID" --page "$PAGE"
+# a suggestion whose base is no longer the head → exit 5, nothing published
+buzz pages accept "$STALE_SUG" --channel "$CHANNEL_ID" --page "$PAGE"; echo "exit: $?"
+# accepting again → exit 5 ("already applied")
+
+# reject → a `rejected` resolution; the suggestion drops out of `history --suggestions`
+buzz pages reject "$STALE_SUG" --channel "$CHANNEL_ID" --page "$PAGE"
+
+# history (newest first; same-second edits are ordered by what they were built on)
+buzz --format compact pages history "$PAGE" --channel "$CHANNEL_ID"
+
+# export — the head's markdown byte for byte (stdout, or --out FILE and a JSON summary)
+buzz pages export "$PAGE" --channel "$CHANNEL_ID" > roundtrip.md
+
+# ls — one head per page; add --channel to scope. Stops early with a stderr warning.
+buzz pages ls --channel "$CHANNEL_ID" | jq .
+
+# bounds: >65,536 bytes is refused before any request (exit 1); a no-op revision is the
+# relay's `invalid:` (exit 1); empty bodies need --allow-empty
+head -c 70000 /dev/zero | tr '\0' a | buzz pages set --channel "$CHANNEL_ID" --new --title big; echo "exit: $?"
+```
+
+The same walkthrough runs unattended as
+`cargo test -p buzz-cli --test pages_cli -- --ignored` (CI runs it in the relay E2E
+step). Exit-code contract for writes: `conflict:` → 5, `invalid:` → 1, `restricted:`
+→ 3, `duplicate:` → success.
+
 ---
 
 ## 7. Error Path Testing
@@ -625,3 +692,11 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 60 | `notes ls` | ☐ | Own, --author all, --tag, --limit |
 | 61 | `notes rm` | ☐ | Delete→get 404, double-delete idempotent, missing slug → NotFound |
 | 62 | `users set-status` | ☐ | Text+emoji, text only, emoji-only (`--text ""`), `--clear`, `--clear` + `--text` → exit 1 |
+| 63 | `pages set` | ☐ | `--new`, edit on head, stale `--base` → exit 5, missing `--base` → exit 1, stdin, oversize, no-op |
+| 64 | `pages get` | ☐ | Head, `--rev`, foreign revision → not found, `--format compact` |
+| 65 | `pages suggest` | ☐ | Page unchanged; open in `history --suggestions` |
+| 66 | `pages accept` | ☐ | One revision; stale → exit 5 with nothing published; second accept → exit 5 |
+| 67 | `pages reject` | ☐ | Closes the suggestion |
+| 68 | `pages history` | ☐ | Newest first, `--suggestions`, `--limit` truncation warning |
+| 69 | `pages export` | ☐ | Byte-identical to the head; `--out` |
+| 70 | `pages ls` | ☐ | Per channel and library-wide; `--limit` warning |

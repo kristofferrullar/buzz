@@ -213,6 +213,9 @@ enum Cmd {
     /// Publish and edit long-form NIP-23 notes — team knowledge base
     #[command(subcommand)]
     Notes(NotesCmd),
+    /// Channel pages with revisions and suggestions — agents suggest, people accept (NIP-PG)
+    #[command(subcommand)]
+    Pages(commands::pages::PagesCmd),
     /// Announce and discover git repositories (NIP-34)
     #[command(subcommand)]
     Repos(ReposCmd),
@@ -2115,6 +2118,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Feed(sub) => commands::feed::dispatch(sub, &client, &cli.format).await,
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
+        Cmd::Pages(sub) => commands::pages::dispatch(sub, &client, &cli.format).await,
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
         Cmd::Projects(sub) => commands::projects::dispatch(sub, &client).await,
         Cmd::Patches(sub) => commands::patches::dispatch(sub, &client).await,
@@ -2266,6 +2270,7 @@ mod tests {
             "moderation",
             "notes",
             "pack",
+            "pages",
             "patches",
             "pr",
             "projects",
@@ -2442,6 +2447,10 @@ mod tests {
             vec!["assign", "create", "get", "list", "status", "unassign"]
         );
         assert_eq!(names(&cmd, "media"), vec!["get"]);
+        assert_eq!(
+            names(&cmd, "pages"),
+            vec!["accept", "export", "get", "history", "ls", "reject", "set", "suggest"]
+        );
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
         assert_eq!(names(&cmd, "pack"), vec!["inspect", "validate"]);
         assert_eq!(
@@ -2472,6 +2481,7 @@ mod tests {
             ("media", 1),
             ("messages", 8),
             ("pack", 2),
+            ("pages", 8),
             ("patches", 4),
             ("pr", 5),
             ("projects", 8),
