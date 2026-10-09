@@ -47,6 +47,10 @@ abstract final class EventKind {
   static const huddleParticipantJoined = 48101;
   static const huddleParticipantLeft = 48102;
   static const huddleEnded = 48103;
+  // NIP-PG pages (fork-private block 52000–52099). Mirror of buzz-core's KIND_PAGE_*.
+  static const pageRevision = 52000;
+  static const pageSuggestion = 52001;
+  static const pageSuggestionResolution = 52002;
 
   /// Event kinds that represent user-visible channel messages.
   static const channelMessageEventKinds = [
