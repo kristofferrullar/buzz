@@ -476,11 +476,8 @@ fn a_page_event_over_the_tag_cap_is_rejected() {
     let (channel, page) = (Uuid::new_v4(), Uuid::new_v4());
     let (channel, page) = (channel.to_string(), page.to_string());
     let pubkey = Keys::generate().public_key().to_hex();
-    let mut tags: Vec<Vec<&str>> = vec![
-        vec!["h", &channel],
-        vec!["d", &page],
-        vec!["title", "Plan"],
-    ];
+    let mut tags: Vec<Vec<&str>> =
+        vec![vec!["h", &channel], vec!["d", &page], vec!["title", "Plan"]];
     tags.extend((0..MAX_PAGE_TAGS).map(|_| vec!["p", pubkey.as_str()]));
     let refs: Vec<&[&str]> = tags.iter().map(Vec::as_slice).collect();
     assert!(expect_err(&raw(KIND_PAGE_REVISION, &refs, "body")).contains("maximum of"));
