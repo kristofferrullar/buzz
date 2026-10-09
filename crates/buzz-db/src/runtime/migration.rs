@@ -1830,6 +1830,9 @@ mod postgres_tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
+        // Fork-added Pages projection (migrations/9001_pages_index.sql); it
+        // postdates 0029, so only the desired-state schema attaches the fence.
+        expected_fences.insert("pages".to_string());
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"
