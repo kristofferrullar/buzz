@@ -213,6 +213,8 @@ pub(crate) fn resolve_cursor_agent_command(command: &str) -> Option<std::path::P
 }
 
 fn cursor_agent_version_dirs(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    // Only macOS pushes a second directory; elsewhere `mut` is unused.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut dirs = vec![home.join(".local/share/cursor-agent/versions")];
     #[cfg(target_os = "macos")]
     {
