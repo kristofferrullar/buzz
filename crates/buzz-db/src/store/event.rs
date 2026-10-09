@@ -168,10 +168,12 @@ const HUDDLE_LINK_CANDIDATE_LIMIT: i64 = 32;
 ///
 /// For NIP-33 parameterized replaceable events (kind 30000–39999): returns the first
 /// `d` tag's value, or `""` if no `d` tag is present (per NIP-33 spec).
+/// For NIP-PG page events (kinds 52000–52002, regular kinds) the page id is stored
+/// the same way, so `#d` queries are answered in SQL instead of after a row limit.
 /// For all other events: returns `None` (column stays NULL).
 pub fn extract_d_tag(event: &Event) -> Option<String> {
     let kind_u32 = event.kind.as_u16() as u32;
-    if !is_parameterized_replaceable(kind_u32) {
+    if !is_parameterized_replaceable(kind_u32) && !buzz_core::page::is_page_kind(kind_u32) {
         return None;
     }
     let val = event

@@ -15,6 +15,7 @@ use buzz_core::CommunityId;
 use buzz_datastore_tracing::datastore_span;
 
 use crate::error::SearchError;
+use crate::page_head;
 
 /// Channel-scope filter for a community-scoped FTS query.
 ///
@@ -139,7 +140,11 @@ const SEARCH_TEXT_MAX_CHARS: usize = 4096;
 /// wire untrusted input into a multi-trillion-row OFFSET.
 const PAGE_MAX: u32 = 1000;
 
-fn push_tsquery(qb: &mut QueryBuilder<sqlx::Postgres>, mode: SearchMode, search_text: &str) {
+pub(crate) fn push_tsquery(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    mode: SearchMode,
+    search_text: &str,
+) {
     match mode {
         SearchMode::FullText => {
             qb.push("websearch_to_tsquery('simple', ");
@@ -178,80 +183,13 @@ fn push_tsquery(qb: &mut QueryBuilder<sqlx::Postgres>, mode: SearchMode, search_
         }
     }
 }
-fn normalized_search_text(q: &str) -> Option<String> {
-    let trimmed = q.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
 
-    let mut cleaned = String::with_capacity(trimmed.len().min(SEARCH_TEXT_MAX_CHARS));
-    for ch in trimmed.chars().take(SEARCH_TEXT_MAX_CHARS) {
-        cleaned.push(if ch == '\0' { ' ' } else { ch });
-    }
-
-    let cleaned = cleaned.trim();
-    if cleaned.is_empty() {
-        None
-    } else {
-        Some(cleaned.to_string())
-    }
-}
-
-/// Execute a community-scoped FTS query.
+/// Push the caller-supplied scope filters (channel scope, kinds, authors,
+/// since, until) onto a statement whose row source is named `events`.
 ///
-/// SQL shape (always):
-/// ```sql
-/// SELECT id, kind, pubkey, channel_id, EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s,
-///        ts_rank_cd(search_tsv, query) AS rank
-/// FROM events,
-///      <mode-specific tsquery> AS query
-/// WHERE community_id = $ctx
-///   AND deleted_at IS NULL
-///   AND search_tsv @@ query
-///   [+ channel scope, kinds, authors, since, until]
-/// ORDER BY rank DESC, created_at DESC, id
-/// LIMIT $per_page OFFSET (($page - 1) * $per_page)
-/// ```
-///
-/// `community_id = $ctx` is the first predicate and is non-negotiable. There
-/// is no code path through this function that omits it.
-#[datastore_span(name = "search", system = "postgresql")]
-pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, SearchError> {
-    let Some(search_text) = normalized_search_text(&query.q) else {
-        return Ok(SearchResult {
-            hits: Vec::new(),
-            page: query.page.clamp(1, PAGE_MAX),
-        });
-    };
-
-    let per_page = query.per_page.clamp(1, PER_PAGE_MAX);
-    let per_page_actual = if query.per_page == 0 {
-        PER_PAGE_DEFAULT
-    } else {
-        per_page
-    };
-    let page = query.page.clamp(1, PAGE_MAX);
-    let offset = ((page - 1) as i64) * (per_page_actual as i64);
-    // Profile typeahead uses broad prefix matching. For one- and two-character
-    // queries, a busy community can have enough newer prefix matches to push a
-    // short exact display name off the bounded first page. Keep the same result
-    // set and pagination contract, but put rows containing the whole lexeme
-    // first for this one narrow caller shape.
-    let prioritize_exact_profile_lexeme = query.mode == SearchMode::Prefix
-        && query.kinds.as_deref() == Some(&[0][..])
-        && search_text.chars().count() <= 2;
-
-    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
-        "SELECT id, kind, pubkey, channel_id, \
-         EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s, \
-         ts_rank_cd(search_tsv, search_query.query) AS rank \
-         FROM events CROSS JOIN LATERAL (SELECT ",
-    );
-    push_tsquery(&mut qb, query.mode, &search_text);
-    qb.push(" AS query) AS search_query WHERE community_id = ");
-    qb.push_bind(*query.community.as_uuid());
-    qb.push(" AND deleted_at IS NULL AND search_tsv @@ search_query.query");
-
+/// Shared by the generic `events` arm and the page-head arm
+/// ([`crate::page_head`]) so both honor exactly the same NIP-01 constraints.
+pub(crate) fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, query: &SearchQuery) {
     // Channel scope — see `ChannelScope` doc for the four-case mapping. The
     // emitted SQL fragments are identical to the legacy 2x2 tuple for the
     // three carry-over cases; `ChannelLessOnly` is the new fence that the
@@ -302,6 +240,94 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         qb.push_bind(until);
         qb.push(")");
     }
+}
+
+fn normalized_search_text(q: &str) -> Option<String> {
+    let trimmed = q.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut cleaned = String::with_capacity(trimmed.len().min(SEARCH_TEXT_MAX_CHARS));
+    for ch in trimmed.chars().take(SEARCH_TEXT_MAX_CHARS) {
+        cleaned.push(if ch == '\0' { ' ' } else { ch });
+    }
+
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned.to_string())
+    }
+}
+
+/// Execute a community-scoped FTS query.
+///
+/// SQL shape (always):
+/// ```sql
+/// SELECT id, kind, pubkey, channel_id, created_at,
+///        EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s,
+///        ts_rank_cd(search_tsv, query) AS rank
+/// FROM events,
+///      <mode-specific tsquery> AS query
+/// WHERE community_id = $ctx
+///   AND deleted_at IS NULL
+///   AND search_tsv @@ query
+///   AND kind NOT IN (<page kinds>)
+///   [+ channel scope, kinds, authors, since, until]
+///   [UNION ALL <page-head arm>, only when `kinds` names the page revision kind]
+/// ORDER BY rank DESC, created_at DESC, id
+/// LIMIT $per_page OFFSET (($page - 1) * $per_page)
+/// ```
+///
+/// Page kinds never match through the generic arm; a page matches only through
+/// its head revision, in the page-head arm (the private `page_head` module).
+///
+/// `community_id = $ctx` is the first predicate and is non-negotiable. There
+/// is no code path through this function that omits it (the page-head arm
+/// carries it on both the page index and the head event).
+#[datastore_span(name = "search", system = "postgresql")]
+pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, SearchError> {
+    let Some(search_text) = normalized_search_text(&query.q) else {
+        return Ok(SearchResult {
+            hits: Vec::new(),
+            page: query.page.clamp(1, PAGE_MAX),
+        });
+    };
+
+    let per_page = query.per_page.clamp(1, PER_PAGE_MAX);
+    let per_page_actual = if query.per_page == 0 {
+        PER_PAGE_DEFAULT
+    } else {
+        per_page
+    };
+    let page = query.page.clamp(1, PAGE_MAX);
+    let offset = ((page - 1) as i64) * (per_page_actual as i64);
+    // Profile typeahead uses broad prefix matching. For one- and two-character
+    // queries, a busy community can have enough newer prefix matches to push a
+    // short exact display name off the bounded first page. Keep the same result
+    // set and pagination contract, but put rows containing the whole lexeme
+    // first for this one narrow caller shape.
+    let prioritize_exact_profile_lexeme = query.mode == SearchMode::Prefix
+        && query.kinds.as_deref() == Some(&[0][..])
+        && search_text.chars().count() <= 2;
+
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+        "SELECT id, kind, pubkey, channel_id, created_at, \
+         EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s, \
+         ts_rank_cd(search_tsv, search_query.query) AS rank \
+         FROM events CROSS JOIN LATERAL (SELECT ",
+    );
+    push_tsquery(&mut qb, query.mode, &search_text);
+    qb.push(" AS query) AS search_query WHERE community_id = ");
+    qb.push_bind(*query.community.as_uuid());
+    qb.push(" AND deleted_at IS NULL AND search_tsv @@ search_query.query");
+    // Page kinds never match through the generic index: a page matches only
+    // through its head revision, which `push_page_head_arm` adds below.
+    page_head::push_page_kind_exclusion(&mut qb);
+
+    push_event_filters(&mut qb, query);
+    page_head::push_page_head_arm(&mut qb, query, &search_text);
 
     if prioritize_exact_profile_lexeme {
         qb.push(" ORDER BY search_tsv @@ websearch_to_tsquery('simple', ");

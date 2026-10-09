@@ -69,7 +69,6 @@ home page; that is a separate, reversible migration.
   be set with the relay change).
 - Whether write access mirrors canvas scope or message scope.
 - Protocol-level enforcement of "agents suggest, humans accept".
-- Search: head revisions only (index exclusion vs page-aware filtering).
 - Public publishing of selected pages as NIP-23 notes (public channels only).
 - Real-time co-editing (a CRDT such as Yjs, using Tiptap's collaboration
   extension rather than custom code).

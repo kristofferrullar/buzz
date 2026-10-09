@@ -1,6 +1,8 @@
 #![deny(unsafe_code)]
 
 mod acp;
+#[cfg(test)]
+mod base_prompt_pages;
 mod config;
 mod engram_fetch;
 mod filter;
