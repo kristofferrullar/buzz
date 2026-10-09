@@ -32,12 +32,15 @@ MUST reference an event of the same `(h, d)`.
 
 ## Tags
 
-Common: `["h", "<channel uuid>"]`, `["d", "<page id, uuid v4>"]`.
+Common: `["h", "<channel uuid>"]`, `["d", "<page id, uuid v4>"]`. Both ids are
+written as canonical lowercase hyphenated UUIDs and event ids as 64 lowercase
+hex characters; the relay indexes only events written that way.
 
 `PAGE_REVISION`
 - `["prev", "<event id of the revision this was based on>"]` — omitted on the
-  first revision of a page; required otherwise.
-- `["title", "<utf-8 title>"]` — required, non-blank, at most 256 bytes.
+  first revision of a page; required otherwise. At most one.
+- `["title", "<utf-8 title>"]` — required, exactly one, non-blank, at most 256
+  bytes.
 - `["suggestion", "<event id>"]` — optional; present when the revision applies
   a suggestion (see Accepting a suggestion).
 - `content`: markdown, UTF-8.
@@ -98,7 +101,25 @@ MUST be reconstructable by replaying `PAGE_REVISION` events alone, and the
 rebuilt result MUST equal the live index. Because the conflict check runs only
 at ingest, a replay can meet several tips (an import, a restore, or events from
 another relay): the head is then the tip with the greatest `created_at`, ties
-broken by the lowest event id. If the head is deleted, the head is its `prev`.
+broken by the lowest event id. If the head is deleted, the head is its `prev`,
+repeatedly, until a live revision is reached.
+
+The projection of one page `(h, d)`, computed over all its stored revisions
+including deleted ones (revisions that fail the tag rules above are skipped):
+
+| Field | Value |
+|-------|-------|
+| head | the tip (a revision no other revision names as `prev`) with the greatest `created_at`, ties to the lowest event id; if deleted, its `prev`, repeatedly |
+| title, `updated_by`, `updated_at` | the head revision's title, author and own `created_at` (event time, never relay wall-clock time) |
+| `created_by`, `created_at` | the root revision's author and `created_at`; with several roots, the earliest, ties to the lowest event id |
+| revision count | every stored revision of the page, deleted ones included |
+
+A page with no live head has no index row. A page is deleted by soft-deleting
+its revision, suggestion and resolution events in the same atomic operation as
+its index tombstone, so a replay agrees: it finds no live revision and emits no
+row. An index tombstone without deleted events would be resurrected by a replay
+and is therefore not a valid deletion. Who may delete a page remains an open
+question.
 
 ## Search
 
@@ -125,7 +146,8 @@ at the protocol level needs a trusted agent-role signal and is an open question.
 
 - Protocol-level enforcement of the agent review gate (requires an agent-role
   signal the relay can trust).
-- Page deletion semantics (follow existing channel-event deletion).
+- Who may delete a page, and how that interacts with NIP-09 deletion of
+  individual revisions (the storage effect is defined under Rebuild Invariant).
 - Retention cap on stored revisions per page.
 - Write scope: mirror canvas scope or message scope.
 - Search: exclude page kinds from the generic index vs page-aware filtering.

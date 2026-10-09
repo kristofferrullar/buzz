@@ -18,11 +18,36 @@ upstream stays routine and never means rebuilding the feature.
    test fails if `kinds.ts` or `nostr_models.dart` drift from `kind.rs`.
 5. **One migration, additive, never renumbered.** `CREATE ... IF NOT EXISTS`, no
    edits to existing tables, and the same change in `schema/schema.sql`. sqlx
-   records each applied migration by version and checksum, so renaming a
-   migration after it has been applied fails startup. The pages migration
-   therefore takes a fork-private version number well clear of upstream's
-   sequence (chosen and proven against sqlx and the repo's migration checks in
-   the db change, PR2), so an upstream merge never forces a rename.
+   records each applied migration by version and checksum, so renaming or
+   editing a migration after it has been applied fails startup. The pages
+   migration is therefore **`migrations/9001_pages_index.sql`**: fork-private
+   versions are allocated from 9000 upward, far above upstream's sequence
+   (0001-0044 today), so an upstream merge never forces a rename.
+
+   What was proven (tests in
+   `crates/buzz-db/src/runtime/migration/pages_fork_tests.rs`, all passing):
+   - sqlx (0.9) applies any pending version in ascending order and checks only
+     that every *applied* version is still embedded and unchanged. It does not
+     require contiguous numbers and does not reject a pending version lower than
+     the highest applied one. No repo script, CI job or lint requires
+     contiguous numbering. `ignore_missing` is not needed and is not used.
+   - A fresh database applies 0001-00NN and then 9001 last; an upstream-only
+     database upgrades by applying just 9001; the migration is idempotent.
+   - A database that already applied 9001 starts cleanly after a later upstream
+     migration is added (simulated with a synthetic migration numbered above
+     upstream's highest, built in the test, not committed), and a fresh database
+     applies the merged set with 9001 last.
+   - Renaming 9001 fails with `VersionMissing(9001)` and editing it fails with
+     `VersionMismatch(9001)`: the failures this rule exists to avoid.
+   - `schema/schema.sql` and the migration build the same `pages` table and fence
+     the same tables (the desired state is bootstrapped through the real
+     `bin/pgschema`, then `scripts/reconcile-schema-after-pgschema.sql`).
+   - A test fails if upstream's highest version ever comes within 1,000 of 9001.
+
+   Consequences to remember: tests that count or index upstream migrations must
+   exclude versions >= 9000 (`embedded_migrator_contains_consolidated_initial_schema`
+   does), and a community-scoped table needs its row in the deletion manifests
+   below.
 6. **Replayable.** The page index must be rebuildable from events (NIP-PG).
 
 ## Conflict hotspots
@@ -31,14 +56,18 @@ upstream stays routine and never means rebuilding the feature.
 |------|----------|
 | `crates/buzz-core/src/kind.rs` | one constants block plus `ALL_KINDS` entries |
 | `crates/buzz-relay/src/handlers/ingest.rs` | scope and `h`-scope list entries; a test checks every page kind appears in both |
-| `migrations/`, `schema/schema.sql` | one additive file / block |
+| `migrations/`, `schema/schema.sql` | one additive file (`9001_pages_index.sql`) / one block above the deletion section |
+| `crates/buzz-db/src/store/deletion.rs` | `"pages"` in `EXPECTED_SCOPED_TABLES` and, before `"channels"`, in `PURGE_SCOPED_TABLES` (a community-scoped table missing from the first blocks community deletion) |
+| `crates/buzz-db/src/runtime/migration.rs` | one `mod pages_fork_tests;` line; the `< FORK_PRIVATE_VERSION_FLOOR` filter in `embedded_migrator_contains_consolidated_initial_schema`; one `apply_fork_private_migrations` call before the catalog check in `migration_0044_drops_populated_nip_fi_ledger_cleanly` (that test stops at 0044 and the deletion manifest now lists `pages`) |
+| `crates/buzz-db/src/store/mod.rs`, `crates/buzz-db/src/lib.rs` | `pub mod page;` and `pub use store::page;` |
 | `crates/buzz-cli/src/commands/mod.rs` | `pub mod pages;` and its dispatch |
 | `desktop/src/shared/constants/kinds.ts` | mirrored kind constants |
 | `mobile/lib/shared/relay/nostr_models.dart` | mirrored kind constants |
 | desktop sidebar, routes, `e2eBridge.ts` | one entry each |
 | `preview-features.json` | one `pages` entry |
 
-Everything else lives in new files: `crates/buzz-db/src/store/page.rs`,
+Everything else lives in new files: `crates/buzz-db/src/store/page.rs` (with its
+tests under `crates/buzz-db/src/store/page/`),
 `crates/buzz-cli/src/commands/pages.rs`, `desktop/src/features/pages/`, and
 `crates/buzz-test-client/tests/e2e_pages.rs`.
 
@@ -62,7 +91,9 @@ Sync often; small drift keeps hotspot conflicts to a line or two.
 - No duplicate kind values (the `no_duplicate_kind_values` test).
 - Fresh-database migration passes, and an upgrade test applying our migration
   first and upstream's new ones afterwards (a database that already applied
-  ours) passes.
+  ours) passes: `cargo nextest run -p buzz-db pages_fork_tests` (Postgres lane).
+- `EXPECTED_SCOPED_TABLES` still equals the live set of community-scoped tables
+  (the deletion catalog tests), and `pages` is still fenced.
 - Pages e2e tests still bind the production ingest path (a guard removed from
   `ingest.rs` must still fail a test).
 - Upstream has not allocated a kind or table name we use.
