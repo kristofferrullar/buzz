@@ -1714,6 +1714,10 @@ async fn handle_delete_event_side_effect(
             }
             _ => {} // Same channel — OK
         }
+        // NIP-PG: a page event is deleted together with its head-index repair.
+        if buzz_core::page::is_page_kind(u32::from(target_event.event.kind.as_u16())) {
+            return super::pages::delete_page_event(tenant, state, &target_id).await;
+        }
     }
 
     // Look up thread metadata so we can pass parent/root IDs to the
@@ -2242,6 +2246,9 @@ async fn handle_standard_deletion_event(
         return handle_a_tag_deletion(tenant, event, state).await;
     }
 
+    // A page-event deletion can fail on its page lock; keep going so the other
+    // targets of this event are still deleted, then surface the first failure.
+    let mut page_failure: Option<anyhow::Error> = None;
     for target_id in target_ids {
         let target_event = match state
             .db
@@ -2256,6 +2263,14 @@ async fn handle_standard_deletion_event(
                 target_id = %hex::encode(&target_id),
                 "NIP-09 deletion ignored for push lease"
             );
+            continue;
+        }
+
+        // NIP-PG: a page event is deleted together with its head-index repair.
+        if buzz_core::page::is_page_kind(u32::from(target_event.event.kind.as_u16())) {
+            if let Err(error) = super::pages::delete_page_event(tenant, state, &target_id).await {
+                page_failure.get_or_insert(error);
+            }
             continue;
         }
 
@@ -2354,7 +2369,7 @@ async fn handle_standard_deletion_event(
         }
     }
 
-    Ok(())
+    page_failure.map_or(Ok(()), Err)
 }
 
 /// Extract channel UUID from `h` tag (NIP-29 group ID).

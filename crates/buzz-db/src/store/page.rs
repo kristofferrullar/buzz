@@ -35,6 +35,13 @@
 //! soft-deleted in the same transaction, so a rebuild drops it instead of
 //! resurrecting it.
 //!
+//! ## Ingest
+//!
+//! The [`ingest`] submodule holds the transaction-bound primitives the relay
+//! composes to validate and store a page event atomically (reads of referenced
+//! events, the suggestion-closure check, the event insert, and deleting a page
+//! event while repairing the head).
+//!
 //! ## Concurrency
 //!
 //! Writers take a shared transaction-scoped advisory lock on the page's channel;
@@ -699,12 +706,21 @@ pub async fn list_pages_for_channels(
 /// read and a rebuild by replay agrees (it finds no live revision). Returns
 /// `false` without touching anything when there is no live page with this
 /// identity in `community`.
+///
+/// Takes the page's writer lock ([`lock_page_for_write_in_transaction`]) first. A
+/// suggestion or resolution in flight has already read the page's live events and
+/// does not touch the index row, so without the lock it could commit its event
+/// after this transaction soft-deleted the page's events and leave it live against
+/// a deleted page. With it, such a writer either commits before this transaction
+/// reads the events (and is deleted with them) or starts after it ends (and finds
+/// no live reference). The wait is bounded by [`PAGE_WRITE_LOCK_TIMEOUT_MS`].
 pub async fn soft_delete_page_in_transaction(
     tx: &mut Transaction<'_, Postgres>,
     community: CommunityId,
     channel_id: Uuid,
     page_id: Uuid,
 ) -> Result<bool> {
+    lock_page_for_write_in_transaction(tx, community, channel_id, page_id).await?;
     lock_channel_pages(tx.as_mut(), community, channel_id, PageLock::Shared).await?;
     let tombstoned = sqlx::query(
         "UPDATE pages SET deleted_at = NOW() \
@@ -1089,6 +1105,14 @@ impl Db {
         Ok(report)
     }
 }
+
+mod ingest;
+pub use ingest::{
+    align_recreated_page_in_transaction, insert_page_event_in_transaction, is_lock_timeout,
+    load_event_in_transaction, lock_page_for_write_in_transaction, parse_page_event_id,
+    parse_page_uuid, soft_delete_page_event_in_transaction, suggestion_state_in_transaction,
+    PageEventDeletion, PageEventRecord, SuggestionState, PAGE_WRITE_LOCK_TIMEOUT_MS,
+};
 
 #[cfg(test)]
 mod parse_tests;

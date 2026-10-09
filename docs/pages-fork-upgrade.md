@@ -55,7 +55,12 @@ upstream stays routine and never means rebuilding the feature.
 | File | Our edit |
 |------|----------|
 | `crates/buzz-core/src/kind.rs` | one constants block plus `ALL_KINDS` entries |
-| `crates/buzz-relay/src/handlers/ingest.rs` | scope and `h`-scope list entries; a test checks every page kind appears in both |
+| `crates/buzz-relay/src/handlers/ingest.rs` | scope arm and `h`-scope list entries; two hooks (`pages::validate_shape` after the other envelope validators, `pages::store_page_event` as the first storage branch); a test checks every page kind in `ALL_KINDS` appears in both lists |
+| `crates/buzz-relay/src/handlers/req.rs` | `stores_d_tag` (NIP-33 or page kind) replaces the NIP-33-only test in `filter_to_query_params` and `filter_fully_pushable`, so `#d` on page kinds is pushed into SQL (REQ, COUNT, HTTP bridges) |
+| `crates/buzz-relay/src/handlers/side_effects.rs` | two 4-line hooks in the 9005 and NIP-09 deletion handlers calling `pages::delete_page_event` (delete a page event and repair the head in one transaction) |
+| `crates/buzz-relay/src/handlers/mod.rs` | `pub mod pages;` |
+| `crates/buzz-db/src/store/event.rs` | `extract_d_tag` also returns the page id for page kinds (the `d_tag` column the `#d` pushdown reads) |
+| `.github/workflows/_ci-relay.yml` | `--test e2e_pages` in the Relay E2E step |
 | `migrations/`, `schema/schema.sql` | one additive file (`9001_pages_index.sql`) / one block above the deletion section |
 | `crates/buzz-db/src/store/deletion.rs` | `"pages"` in `EXPECTED_SCOPED_TABLES` and, before `"channels"`, in `PURGE_SCOPED_TABLES` (a community-scoped table missing from the first blocks community deletion) |
 | `crates/buzz-db/src/runtime/migration.rs` | one `mod pages_fork_tests;` line; the `< FORK_PRIVATE_VERSION_FLOOR` filter in `embedded_migrator_contains_consolidated_initial_schema`; one `apply_fork_private_migrations` call before the catalog check in `migration_0044_drops_populated_nip_fi_ledger_cleanly` (that test stops at 0044 and the deletion manifest now lists `pages`) |
@@ -67,7 +72,8 @@ upstream stays routine and never means rebuilding the feature.
 | `preview-features.json` | one `pages` entry |
 
 Everything else lives in new files: `crates/buzz-db/src/store/page.rs` (with its
-tests under `crates/buzz-db/src/store/page/`),
+ingest primitives and tests under `crates/buzz-db/src/store/page/`),
+`crates/buzz-relay/src/handlers/pages.rs` (validation and atomic storage),
 `crates/buzz-cli/src/commands/pages.rs`, `desktop/src/features/pages/`, and
 `crates/buzz-test-client/tests/e2e_pages.rs`.
 
@@ -96,4 +102,9 @@ Sync often; small drift keeps hotspot conflicts to a line or two.
   (the deletion catalog tests), and `pages` is still fenced.
 - Pages e2e tests still bind the production ingest path (a guard removed from
   `ingest.rs` must still fail a test).
+- `#d` on page kinds is still answered in SQL: `stores_d_tag` in `req.rs` and
+  `extract_d_tag` in `event.rs` must both still cover page kinds
+  (`quiet_page_history_is_exact_in_a_flooded_channel` fails if either is lost).
+- Upstream has not started storing a different value in `events.d_tag` for
+  regular kinds, and no upstream query treats `d_tag IS NOT NULL` as "NIP-33 row".
 - Upstream has not allocated a kind or table name we use.
