@@ -14,6 +14,14 @@
 //! scoped fetcher and runs access checks per hit; search is never the access
 //! boundary (conformance row 50).
 //!
+//! ## Pages (NIP-PG)
+//!
+//! A page matches only through its head revision: page kinds are excluded from
+//! the generic `events` arm, and a second arm matches the head's searchable text
+//! kept on the page's own row (`pages.search_tsv`). The arm runs when the query's
+//! `kinds` names the page revision kind. See the private `page_head` module and
+//! `docs/nips/NIP-PG.md` ("Search").
+//!
 //! ## Multi-tenant fence
 //!
 //! Every [`SearchQuery`] carries a [`CommunityId`]. There is no construction
@@ -25,6 +33,8 @@
 pub mod error;
 /// Search query execution.
 pub mod query;
+
+mod page_head;
 
 pub use buzz_core::CommunityId;
 pub use error::SearchError;

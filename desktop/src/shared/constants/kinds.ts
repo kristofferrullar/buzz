@@ -42,6 +42,10 @@ export const KIND_HUDDLE_PARTICIPANT_JOINED = 48101;
 export const KIND_HUDDLE_PARTICIPANT_LEFT = 48102;
 export const KIND_HUDDLE_ENDED = 48103;
 export const KIND_HUDDLE_LIVENESS = 48104;
+// NIP-PG pages (fork-private block 52000–52099). Mirror of buzz-core's KIND_PAGE_*.
+export const KIND_PAGE_REVISION = 52000;
+export const KIND_PAGE_SUGGESTION = 52001;
+export const KIND_PAGE_SUGGESTION_RESOLUTION = 52002;
 // NIP-78 application-specific data. All use kind 30078; the relay
 // differentiates them by d-tag ("read-state:<slotId>", "channel-sections",
 // "channel-mutes", "channel-stars", "channel-sort", "project-sidebar-membership").

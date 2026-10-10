@@ -149,6 +149,7 @@ export function AppShell() {
     goChannel,
     goHome,
     goNewMessage,
+    goPages,
     goProjects,
     goPulse,
     goSettings,
@@ -888,6 +889,7 @@ export function AppShell() {
                             scopeSearchFocusRequest,
                           ]}
                           onSelectHome={() => void goHome()}
+                          onSelectPages={() => void goPages()}
                           onSelectProjects={() => void goProjects()}
                           onSelectPulse={() => void goPulse()}
                           onSelectSettings={handleOpenSettings}

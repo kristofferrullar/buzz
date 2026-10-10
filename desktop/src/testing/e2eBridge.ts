@@ -31,6 +31,11 @@ import {
 } from "@/features/agents/observerRelayStore";
 import { switchManagedAgentModel } from "@/shared/api/agentControl";
 import { mockSearchHitMatches } from "./e2eBridgeSearch.ts";
+import {
+  createMockPageStore,
+  MOCK_PAGE_KINDS,
+  type MockPageWriteFault,
+} from "./e2eBridgePages.ts";
 export { mockSearchHitMatches };
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type {
@@ -1274,6 +1279,11 @@ declare global {
       kind: number;
     }) => boolean;
     __BUZZ_E2E_HAS_MOCK_GLOBAL_KIND_SUBSCRIPTION__?: (kind: number) => boolean;
+    /** True iff a live REQ lists this channel in `#h`; a global REQ never counts. */
+    __BUZZ_E2E_HAS_MOCK_CHANNEL_SCOPED_SUBSCRIPTION__?: (input: {
+      channelName: string;
+      kind: number;
+    }) => boolean;
     __BUZZ_E2E_SET_MOCK_USER_STATUS__?: (input: {
       text: string;
       emoji?: string;
@@ -1335,6 +1345,12 @@ declare global {
      */
     __BUZZ_E2E_REPLACE_MOCK_TEAM_CATALOG_HEAD__?: (event: RelayEvent) => void;
     __BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?: (item: RawFeedItem) => RawFeedItem;
+    /** Store a NIP-PG page event and deliver it to live page subscriptions. */
+    __BUZZ_E2E_PUSH_MOCK_PAGE_EVENT__?: (event: RelayEvent) => void;
+    /** While true, page REQs are answered with CLOSED (a failed relay read). */
+    __BUZZ_E2E_FAIL_PAGE_QUERIES__?: boolean;
+    /** Arms a one-shot failure for the next page write command. */
+    __BUZZ_E2E_PAGE_WRITE_FAULT__?: MockPageWriteFault | null;
     /** Replace an existing feed item by id (or push if not found) and fire the updated event. */
     __BUZZ_E2E_REPLACE_MOCK_FEED_ITEM__?: (
       oldId: string,
@@ -3308,6 +3324,30 @@ const mockUserStatuses: RelayEvent[] = [];
 const mockReminderEvents: RelayEvent[] = [];
 const mockPersonaEvents: RelayEvent[] = [];
 const mockTeamCatalogEvents: RelayEvent[] = [];
+const mockPageStore = createMockPageStore({
+  alice: ALICE_PUBKEY,
+  agent: PROFILE_ONLY_AGENT_PUBKEY,
+  bob: BOB_PUBKEY,
+  viewer: MOCK_IDENTITY_PUBKEY,
+});
+
+/** Mock of the page write commands: relay-faithful checks, then a live event. */
+async function handleMockPageWrite(
+  command: string,
+  args: Record<string, unknown>,
+): Promise<{ event_id: string }> {
+  const fault = window.__BUZZ_E2E_PAGE_WRITE_FAULT__ ?? null;
+  window.__BUZZ_E2E_PAGE_WRITE_FAULT__ = null; // one-shot
+  if (fault?.kind === "delay") {
+    await new Promise((resolve) => window.setTimeout(resolve, fault.ms));
+  }
+  const stored = mockPageStore.publish(command, args, {
+    fault,
+    viewerPubkey: MOCK_IDENTITY_PUBKEY,
+  });
+  emitMockLiveEvent(String(args.channelId), stored);
+  return { event_id: stored.id };
+}
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
 const mockAuthResponses: Array<{ success: boolean; message: string }> = [];
@@ -5056,6 +5096,38 @@ function hasMockLiveSubscription(channelId: string, kind?: number) {
     }
   }
 
+  return false;
+}
+
+/**
+ * The relay never delivers a channel-scoped event to a global (`#h`-less) live
+ * REQ: only subscriptions that name the channel in `#h` receive it. The mock's
+ * general emitter is more generous, so channel-scoped page events use these.
+ */
+function emitMockChannelScopedEvent(channelId: string, event: RelayEvent) {
+  for (const socket of mockSockets.values()) {
+    for (const [subId, subscription] of socket.subscriptions) {
+      if (
+        subscription.channelIds.includes(channelId) &&
+        (!subscription.kinds || subscription.kinds.includes(event.kind))
+      ) {
+        sendWsText(socket.handler, ["EVENT", subId, event]);
+      }
+    }
+  }
+}
+
+function hasMockChannelScopedSubscription(channelId: string, kind: number) {
+  for (const socket of mockSockets.values()) {
+    for (const subscription of socket.subscriptions.values()) {
+      if (
+        subscription.channelIds.includes(channelId) &&
+        (!subscription.kinds || subscription.kinds.includes(kind))
+      ) {
+        return true;
+      }
+    }
+  }
   return false;
 }
 
@@ -10975,6 +11047,23 @@ function sendToMockSocket(args: {
       return;
     }
 
+    // NIP-PG page queries (kinds 52000-52002), served from the page store.
+    if (filter.kinds?.some((kind) => MOCK_PAGE_KINDS.has(kind))) {
+      if (window.__BUZZ_E2E_FAIL_PAGE_QUERIES__) {
+        sendWsText(socket.handler, [
+          "CLOSED",
+          subId,
+          "error: mock page query failure",
+        ]);
+        return;
+      }
+      for (const pageEvent of mockPageStore.query(filter)) {
+        sendWsText(socket.handler, ["EVENT", subId, pageEvent]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
     // Project queries: NIP-34 kinds, or kind:1 comments scoped by repo `a`
     // tag or by issue/PR root `e` tag (discussions, approvals, review
     // requests, assignment operations). Channel messages are kind 9, so a
@@ -11598,6 +11687,18 @@ export function maybeInstallE2eTauriMocks() {
   }) => hasMockOwnerKindSubscription(ownerPubkey, kind);
   window.__BUZZ_E2E_HAS_MOCK_GLOBAL_KIND_SUBSCRIPTION__ = (kind) =>
     hasMockLiveSubscription(GLOBAL_MOCK_SUBSCRIPTION, kind);
+  window.__BUZZ_E2E_HAS_MOCK_CHANNEL_SCOPED_SUBSCRIPTION__ = ({
+    channelName,
+    kind,
+  }) => {
+    const channel = mockChannels.find(
+      (candidate) => candidate.name === channelName,
+    );
+    if (!channel) {
+      throw new Error(`Mock channel ${channelName} not found.`);
+    }
+    return hasMockChannelScopedSubscription(channel.id, kind);
+  };
   window.__BUZZ_E2E_EMIT_MOCK_PRESENCE__ = ({ pubkey, status }) => {
     const author = pubkey.toLowerCase();
     setMockPresenceStatus(author, status);
@@ -11614,6 +11715,11 @@ export function maybeInstallE2eTauriMocks() {
       mockTeamCatalogEvents.splice(existingIndex, 1);
     }
     mockTeamCatalogEvents.push(event);
+  };
+  window.__BUZZ_E2E_PUSH_MOCK_PAGE_EVENT__ = (pageEvent) => {
+    mockPageStore.push(pageEvent);
+    const channelId = pageEvent.tags.find((tag) => tag[0] === "h")?.[1];
+    if (channelId) emitMockChannelScopedEvent(channelId, pageEvent);
   };
   window.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ = (item) => {
     const category = item.category === "mention" ? "mentions" : item.category;
@@ -14743,6 +14849,13 @@ export function maybeInstallE2eTauriMocks() {
         // The spec only verifies UI state, not the submitted request shape;
         // returning null mirrors the Rust submit_event success path.
         return null;
+      case "publish_page_revision":
+      case "publish_page_suggestion":
+      case "reject_page_suggestion":
+        return handleMockPageWrite(
+          command,
+          (payload ?? {}) as Record<string, unknown>,
+        );
       case "set_canvas":
         return { ok: true, event_id: mockEventId() };
       case "get_canvas": {

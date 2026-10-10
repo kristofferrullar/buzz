@@ -1215,6 +1215,67 @@ INSERT INTO replica_heartbeat (id) VALUES (1);
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('replica_heartbeat', 'single-row replication freshness token; describes deployment topology, never tenant data');
 
+-- ── Pages head index (NIP-PG, fork-private migrations 9001 and 9002) ─────────
+-- Projection of the PAGE_REVISION event log (kind 52000): one row per page,
+-- identified by the NIP-PG (h, d) pair, naming its current head revision.
+-- Rebuildable by replaying those events. Kept in lock-step with
+-- migrations/9001_pages_index.sql and migrations/9002_pages_search.sql (see
+-- docs/pages-fork-upgrade.md, rule 5); a
+-- parity test compares the pgschema-built catalog with the migrated one. This
+-- block sits above the community write fence section below on purpose: the
+-- dynamic fence loop there attaches the fence to every community_id table that
+-- already exists, including this one (9001 attaches it explicitly).
+
+CREATE TABLE pages (
+    community_id    UUID NOT NULL REFERENCES communities(id),
+    channel_id      UUID NOT NULL,
+    page_id         UUID NOT NULL,
+    head_event_id   BYTEA NOT NULL CHECK (length(head_event_id) = 32),
+    title           TEXT NOT NULL CHECK (length(btrim(title)) > 0 AND octet_length(title) <= 256),
+    created_by      BYTEA NOT NULL CHECK (length(created_by) = 32),
+    created_at      TIMESTAMPTZ NOT NULL,
+    updated_by      BYTEA NOT NULL CHECK (length(updated_by) = 32),
+    updated_at      TIMESTAMPTZ NOT NULL,
+    revision_count  INT NOT NULL DEFAULT 1 CHECK (revision_count >= 1),
+    deleted_at      TIMESTAMPTZ,
+    -- Searchable text of the head revision (fork-private migration 9002): the
+    -- title (weight A) and the head event's content, maintained by the trigger
+    -- below. NIP-PG "Search" matches pages only through this column.
+    search_tsv      TSVECTOR,
+    PRIMARY KEY (community_id, channel_id, page_id),
+    FOREIGN KEY (community_id, channel_id) REFERENCES channels (community_id, id)
+);
+
+CREATE INDEX idx_pages_library
+    ON pages (community_id, updated_at DESC, channel_id DESC, page_id DESC)
+    WHERE deleted_at IS NULL;
+
+CREATE INDEX idx_pages_search_tsv ON pages USING GIN (search_tsv);
+
+-- Page search projection (migrations/9002_pages_search.sql): a NULL vector
+-- (head event missing, deleted or not a revision) never matches.
+CREATE FUNCTION pages_refresh_search_tsv() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.search_tsv := (
+        SELECT setweight(to_tsvector('simple', NEW.title), 'A')
+               || to_tsvector('simple', e.content)
+          FROM events e
+         WHERE e.community_id = NEW.community_id
+           AND e.id = NEW.head_event_id
+           AND e.created_at = NEW.updated_at
+           AND e.kind = 52000
+           AND e.deleted_at IS NULL
+         LIMIT 1
+    );
+    RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER pages_search_tsv
+    BEFORE INSERT OR UPDATE OF head_event_id, title ON pages
+    FOR EACH ROW EXECUTE FUNCTION pages_refresh_search_tsv();
+
 -- ── Whole-community deletion control plane (migration 0029) ─────────────────
 CREATE TABLE community_deletion_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1738,6 +1799,7 @@ SELECT attach_community_write_fence('git_repo_names');
 SELECT attach_community_write_fence('join_policy_acceptances');
 SELECT attach_community_write_fence('moderation_actions');
 SELECT attach_community_write_fence('moderation_reports');
+SELECT attach_community_write_fence('pages');
 SELECT attach_community_write_fence('parameterized_event_watermarks');
 SELECT attach_community_write_fence('pubkey_allowlist');
 SELECT attach_community_write_fence('push_leases');

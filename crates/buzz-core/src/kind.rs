@@ -603,6 +603,16 @@ pub const KIND_HUDDLE_GUIDELINES: u32 = 48106;
 /// Internal kind for media upload audit entries. Not a relay event kind.
 pub const KIND_MEDIA_UPLOAD: u32 = 49001;
 
+// Pages (52000–52099) — fork-private block, see docs/nips/NIP-PG.md and
+// docs/pages-fork-upgrade.md. Keep all page kinds here; the desktop and mobile
+// mirrors must match (the `page` module's parity test enforces it).
+/// NIP-PG: Page revision — append-only, `h`-scoped; the newest in the `prev` chain is the head.
+pub const KIND_PAGE_REVISION: u32 = 52000;
+/// NIP-PG: Page suggestion — a proposed full-content edit against a base revision.
+pub const KIND_PAGE_SUGGESTION: u32 = 52001;
+/// NIP-PG: Page suggestion resolution — accepts or rejects a suggestion.
+pub const KIND_PAGE_SUGGESTION_RESOLUTION: u32 = 52002;
+
 /// NIP-34: Repository announcement (parameterized replaceable, d-tag = repo-id).
 pub const KIND_GIT_REPO_ANNOUNCEMENT: u32 = 30617;
 /// NIP-34: Repository state — current branch/tag refs (parameterized replaceable, d-tag = repo-id).
@@ -754,6 +764,9 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_HUDDLE_ENDED,
     KIND_HUDDLE_LIVENESS,
     KIND_HUDDLE_GUIDELINES,
+    KIND_PAGE_REVISION,
+    KIND_PAGE_SUGGESTION,
+    KIND_PAGE_SUGGESTION_RESOLUTION,
     KIND_MEDIA_UPLOAD,
     KIND_GIT_REPO_ANNOUNCEMENT,
     KIND_GIT_REPO_STATE,
